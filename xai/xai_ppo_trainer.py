@@ -15,6 +15,8 @@ from functools import partial
 from time import perf_counter
 
 import jax
+import jax.numpy as jnp
+import numpy as np
 from tqdm import tqdm
 
 from vmax.agents import datatypes, pipeline
@@ -24,6 +26,51 @@ from vmax.scripts.training import train_utils
 from vmax.simulator import metrics as _metrics
 
 from xai.attention_logger import AttentionLogger
+
+
+def _make_attention_extractor(network, env):
+    """Create a JIT-compiled function to extract attention weights.
+    
+    This function runs outside of pmap on a single device, allowing us to
+    extract attention weights without modifying the main training loop.
+    
+    Args:
+        network: The PPO network containing the policy network with encoder.
+        env: The environment (used to get unflatten_fn).
+        
+    Returns:
+        A JIT-compiled function that takes (policy_params, obs) and returns attention_weights.
+    """
+    # Get the encoder from the policy network
+    encoder = network.policy_network.encoder_layer
+    unflatten_fn = env.get_wrapper_attr("features_extractor").unflatten_features
+    
+    @jax.jit
+    def extract_attention(policy_params, obs):
+        """Extract attention weights from encoder.
+        
+        Args:
+            policy_params: Policy network parameters (from training_state.params.policy).
+            obs: Observation tensor of shape (batch, obs_dim).
+            
+        Returns:
+            Dictionary of attention weight tensors.
+        """
+        # Unflatten observation to dict format expected by encoder
+        obs_dict = unflatten_fn(obs)
+        
+        # Call encoder with return_attention_weights=True
+        # The encoder params are nested under 'encoder_layer' in policy params
+        encoder_params = {'params': policy_params['params']['encoder_layer']}
+        
+        latent, attention_weights = encoder.apply(
+            encoder_params,
+            obs_dict,
+            return_attention_weights=True
+        )
+        return attention_weights
+    
+    return extract_attention
 
 
 if typing.TYPE_CHECKING:
@@ -141,6 +188,12 @@ def train(
     )
     step_fn = partial(inference.policy_step, extra_fields=("truncation", "steps", "rewards"))
     print("-> Initializing networks... Done.")
+    
+    # Create attention extractor for XAI (non-pmapped, runs on single device)
+    attention_extractor = None
+    if do_attention_logging:
+        attention_extractor = _make_attention_extractor(network, env)
+        print("-> Attention extractor created.")
 
     unroll_fn = partial(
         inference.generate_unroll,
@@ -222,28 +275,50 @@ def train(
 
         epoch_log_time = perf_counter() - t
 
-        # Attention logging (XAI)
+        # Attention logging (XAI) - Online extraction
         t = perf_counter()
-        if attention_logger and current_step % attention_log_freq == 0 and current_step > 0:
+        if attention_logger and attention_extractor and current_step % attention_log_freq == 0 and current_step > 0:
             try:
-                # Extract attention weights from the encoder
-                # Note: This requires the encoder to have return_attention_weights=True
-                # For now, we log the batch scenarios and metadata
-                # In a full implementation, you would:
-                # 1. Create a separate forward pass with return_attention_weights=True
-                # 2. Extract attention weights from that pass
-                #
-                # For efficiency, we log batch metadata that can be used
-                # in offline analysis when combined with saved model checkpoints
+                # Get current params (un-pmap to single device)
+                single_params = pmap.unpmap(training_state.params)
+                
+                # Get a sample scenario for observation extraction
+                # Take first n_samples from first device's batch
+                sample_scenario = jax.tree_map(
+                    lambda x: x[0, :attention_n_samples] if x.ndim > 1 else x[:attention_n_samples], 
+                    batch_scenarios
+                )
+                
+                # Reset environment to get observations
+                rng, attn_key = jax.random.split(rng)
+                reset_keys = jax.random.split(attn_key, attention_n_samples)
+                
+                # Vmap over samples to get observations
+                vmapped_reset = jax.vmap(env.reset)
+                env_states = vmapped_reset(sample_scenario, reset_keys)
+                obs = env_states.observation
+                
+                # Extract attention weights (single device, JIT compiled)
+                attention_weights = attention_extractor(single_params.policy, obs)
+                
+                # Convert to numpy for logging
+                attention_weights_np = jax.tree_map(
+                    lambda x: np.array(jax.device_get(x)), 
+                    attention_weights
+                )
+                
                 attention_logger.log(
                     step=current_step,
-                    attention_weights={},  # Placeholder - see note above
-                    simulator_state=batch_scenarios,
+                    attention_weights=attention_weights_np,
+                    simulator_state=sample_scenario,
                     n_samples=attention_n_samples
                 )
                 metrics["xai/attention_log_count"] = current_step // attention_log_freq
+                
             except Exception as e:
                 print(f"[XAI] Warning: Attention logging failed at step {current_step}: {e}")
+                import traceback
+                traceback.print_exc()
 
         epoch_attention_time = perf_counter() - t
 
