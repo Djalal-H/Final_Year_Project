@@ -284,6 +284,7 @@ def train(
         # Attention logging (XAI) - Online extraction
         t = perf_counter()
         if attention_logger and attention_extractor and current_step % attention_log_freq == 0 and current_step > 0:
+            print(f"[XAI] Extracting attention weights at step {current_step}...")
             try:
                 # Get current params (un-pmap to single device)
                 single_params = pmap.unpmap(training_state.params)
@@ -319,6 +320,7 @@ def train(
                     simulator_state=sample_scenario,
                     n_samples=attention_n_samples
                 )
+                print(f"[XAI] Successfully logged attention weights for step {current_step}")
                 metrics["xai/attention_log_count"] = current_step // attention_log_freq
                 
             except Exception as e:
