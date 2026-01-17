@@ -28,22 +28,28 @@ from vmax.simulator import metrics as _metrics
 from xai.attention_logger import AttentionLogger
 
 
-def _make_attention_extractor(network, env):
+def _make_attention_extractor(env, network_config):
     """Create a JIT-compiled function to extract attention weights.
     
     This function runs outside of pmap on a single device, allowing us to
     extract attention weights without modifying the main training loop.
     
     Args:
-        network: The PPO network containing the policy network with encoder.
         env: The environment (used to get unflatten_fn).
+        network_config: Network configuration dict to rebuild the encoder.
         
     Returns:
         A JIT-compiled function that takes (policy_params, obs) and returns attention_weights.
     """
-    # Get the encoder from the policy network
-    encoder = network.policy_network.encoder_layer
+    from vmax.agents.networks import network_factory, network_utils
+    
+    # Rebuild the encoder from config (same as in make_policy_network)
     unflatten_fn = env.get_wrapper_attr("features_extractor").unflatten_features
+    _config = network_utils.convert_to_dict_with_activation_fn(network_config)
+    encoder = network_factory._build_encoder_layer(_config["encoder"], unflatten_fn)
+    
+    if encoder is None:
+        raise ValueError("Cannot extract attention from 'none' encoder type. Use an encoder like 'wayformer'.")
     
     @jax.jit
     def extract_attention(policy_params, obs):
@@ -192,7 +198,7 @@ def train(
     # Create attention extractor for XAI (non-pmapped, runs on single device)
     attention_extractor = None
     if do_attention_logging:
-        attention_extractor = _make_attention_extractor(network, env)
+        attention_extractor = _make_attention_extractor(env, network_config)
         print("-> Attention extractor created.")
 
     unroll_fn = partial(
