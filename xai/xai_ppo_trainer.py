@@ -197,9 +197,29 @@ def train(
     
     # Create attention extractor for XAI (non-pmapped, runs on single device)
     attention_extractor = None
+    extraction_env = None
     if do_attention_logging:
         attention_extractor = _make_attention_extractor(env, network_config)
-        print("-> Attention extractor created.")
+        
+        # Create a base environment for observation extraction (no VmapWrapper)
+        from vmax.simulator import make_env, wrappers
+        extraction_env = make_env(
+            max_num_objects=env_config["max_num_objects"],
+            dynamics_model=dynamics.InvertibleBicycleModel(normalize_actions=True),
+            observation_type=env_config["observation_type"],
+            observation_config=env_config["observation_config"],
+            reward_type="",  # No reward needed for extraction
+            reward_config={},
+        )
+        # Add only necessary wrappers (no VmapWrapper or AutoResetWrapper)
+        extraction_env = wrappers.BraxWrapper(
+            extraction_env, 
+            env_config.get("termination_keys", ["offroad", "overlap"])
+        )
+        if not env_config["sdc_paths_from_data"]:
+            extraction_env = wrappers.SDCPathWrapper(extraction_env)
+        
+        print("-> Attention extractor created with base extraction environment.")
 
     unroll_fn = partial(
         inference.generate_unroll,
@@ -296,24 +316,19 @@ def train(
                 all_attention_weights = []
                 
                 for sample_idx in range(attention_n_samples):
-                    # Extract single scenario from batch (keep batch dim of 1)
+                    # Extract single scenario from batch (no batch dim)
                     single_scenario = jax.tree_map(
-                        lambda x: x[0, sample_idx:sample_idx+1] if x.ndim > 1 else x[sample_idx:sample_idx+1], 
+                        lambda x: x[0, sample_idx] if x.ndim > 1 else x[sample_idx], 
                         batch_scenarios
                     )
                     
-                    # Reset environment to get observation
+                    # Reset extraction environment to get observation
                     rng, sample_key = jax.random.split(rng)
-                    # VmapWrapper expects batched RNG keys
-                    sample_keys = jax.random.split(sample_key, 1)  # shape: (1, 2)
-                    env_state = env.reset(single_scenario, sample_keys)
+                    env_state = extraction_env.reset(single_scenario, sample_key)
                     obs = env_state.observation
                     
-                    # obs is already batched by VmapWrapper, take first element for single-device inference
-                    obs_single = jax.tree_map(lambda x: x[0:1], obs)  # Keep batch dim of 1
-                    
                     # Extract attention weights (single device, JIT compiled)
-                    attn_weights = attention_extractor(single_params.policy, obs_single)
+                    attn_weights = attention_extractor(single_params.policy, obs)
                     all_attention_weights.append(attn_weights)
                 
                 # Stack attention weights from all samples
