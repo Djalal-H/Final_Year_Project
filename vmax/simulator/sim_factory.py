@@ -86,9 +86,10 @@ def make_env(
 
     init_steps = 1 if noisy_init else 11
 
-    # Register metrics
+    # Register metrics (only if not already registered)
     for key in metrics._VMAX_METRICS_REGISTRY:
-        waymax_metrics.register_metric(key, metrics.get_metrics(key))
+        if key not in waymax_metrics._METRIC_REGISTRY:
+            waymax_metrics.register_metric(key, metrics.get_metrics(key))
 
     env_config = _config.EnvironmentConfig(
         max_num_objects=max_num_objects,
@@ -227,9 +228,10 @@ def make_multi_agent_env_for_evaluation(
     # Add SDC V-Max metrics
     metrics_to_run += metrics._VMAX_METRICS_REGISTRY.keys()
 
-    # Register metrics
+    # Register metrics (only if not already registered)
     for key in metrics._VMAX_METRICS_REGISTRY:
-        waymax_metrics.register_metric(key, metrics.get_metrics(key))
+        if key not in waymax_metrics._METRIC_REGISTRY:
+            waymax_metrics.register_metric(key, metrics.get_metrics(key))
 
     init_steps = 1 if noisy_init else 11
 
