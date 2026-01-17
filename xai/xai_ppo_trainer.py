@@ -292,35 +292,44 @@ def train(
                 # Get current params (un-pmap to single device)
                 single_params = pmap.unpmap(training_state.params)
                 
-                # Get a sample scenario for observation extraction
-                # Take first n_samples from first device's batch
-                sample_scenario = jax.tree_map(
-                    lambda x: x[0, :attention_n_samples] if x.ndim > 1 else x[:attention_n_samples], 
-                    batch_scenarios
+                # Process samples one at a time (VmapWrapper expects single scenarios)
+                all_attention_weights = []
+                
+                for sample_idx in range(attention_n_samples):
+                    # Extract single scenario from batch
+                    single_scenario = jax.tree_map(
+                        lambda x: x[0, sample_idx] if x.ndim > 1 else x[sample_idx], 
+                        batch_scenarios
+                    )
+                    
+                    # Reset environment to get observation
+                    rng, sample_key = jax.random.split(rng)
+                    env_state = env.reset(single_scenario, sample_key)
+                    obs = env_state.observation
+                    
+                    # obs is already batched by VmapWrapper, take first element for single-device inference
+                    obs_single = jax.tree_map(lambda x: x[0:1], obs)  # Keep batch dim of 1
+                    
+                    # Extract attention weights (single device, JIT compiled)
+                    attn_weights = attention_extractor(single_params.policy, obs_single)
+                    all_attention_weights.append(attn_weights)
+                
+                # Stack attention weights from all samples
+                attention_weights_np = jax.tree_map(
+                    lambda *arrays: np.stack([np.array(jax.device_get(a)) for a in arrays]),
+                    *all_attention_weights
                 )
                 
-                # Reset environment to get observations
-                # Note: env is already wrapped with VmapWrapper, so reset expects batched inputs
-                rng, attn_key = jax.random.split(rng)
-                reset_keys = jax.random.split(attn_key, attention_n_samples)
-                
-                # Call reset directly (no extra vmap needed)
-                env_states = env.reset(sample_scenario, reset_keys)
-                obs = env_states.observation
-                
-                # Extract attention weights (single device, JIT compiled)
-                attention_weights = attention_extractor(single_params.policy, obs)
-                
-                # Convert to numpy for logging
-                attention_weights_np = jax.tree_map(
-                    lambda x: np.array(jax.device_get(x)), 
-                    attention_weights
+                # Get sample scenarios for logging
+                sample_scenarios = jax.tree_map(
+                    lambda x: x[0, :attention_n_samples] if x.ndim > 1 else x[:attention_n_samples], 
+                    batch_scenarios
                 )
                 
                 attention_logger.log(
                     step=current_step,
                     attention_weights=attention_weights_np,
-                    simulator_state=sample_scenario,
+                    simulator_state=sample_scenarios,
                     n_samples=attention_n_samples
                 )
                 print(f"[XAI] Successfully logged attention weights for step {current_step}")
