@@ -202,22 +202,22 @@ def train(
         attention_extractor = _make_attention_extractor(env, network_config)
         
         # Create a base environment for observation extraction (no VmapWrapper)
+        # Use same observation wrapper as training env
         from vmax.simulator import make_env, wrappers
         
-        # Extract config from the existing env
-        max_num_objects = env.get_wrapper_attr("_config").max_num_objects
-        obs_wrapper = env.get_wrapper_attr("observation_type")
-        obs_config = env.get_wrapper_attr("observation_config")
+        # Get observation config from network config (which came from training config)
+        obs_type = network_config.get("observation_type", "vec")
+        obs_config = network_config.get("observation_config", {})
         
         extraction_env = make_env(
-            max_num_objects=max_num_objects,
+            max_num_objects=64,  # Default, doesn't need to match exactly
             dynamics_model=dynamics.InvertibleBicycleModel(normalize_actions=True),
-            observation_type=obs_wrapper if isinstance(obs_wrapper, str) else "vec",
-            observation_config=obs_config if obs_config else {},
+            observation_type=obs_type,
+            observation_config=obs_config,
             reward_type="",  # No reward needed for extraction
             reward_config={},
         )
-        # Add only necessary wrappers (no VmapWrapper or AutoResetWrapper)
+        # Add only BraxWrapper (no VmapWrapper or AutoResetWrapper)
         extraction_env = wrappers.BraxWrapper(extraction_env, ["offroad", "overlap"])
         
         print("-> Attention extractor created with base extraction environment.")
