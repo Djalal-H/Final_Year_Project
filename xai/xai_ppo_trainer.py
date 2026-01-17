@@ -238,7 +238,7 @@ def train(
                 attention_logger.log(
                     step=current_step,
                     attention_weights={},  # Placeholder - see note above
-                    batch={'scenarios': batch_scenarios},
+                    simulator_state=batch_scenarios,
                     n_samples=attention_n_samples
                 )
                 metrics["xai/attention_log_count"] = current_step // attention_log_freq
