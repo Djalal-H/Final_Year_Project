@@ -315,15 +315,22 @@ def train(
                 # Get current params (un-pmap to single device)
                 single_params = pmap.unpmap(training_state.params)
                 
-                # Process samples one at a time (VmapWrapper expects single scenarios)
+                # Process samples one at a time (extraction_env expects unbatched scenarios)
                 all_attention_weights = []
                 
+                # Import Waymax operations for proper scenario extraction
+                from waymax.datatypes import operations
+                
                 for sample_idx in range(attention_n_samples):
-                    # Extract single scenario from batch (no batch dim)
-                    single_scenario = jax.tree_map(
-                        lambda x: x[0, sample_idx] if x.ndim > 1 else x[sample_idx], 
-                        batch_scenarios
-                    )
+                    # Extract single scenario from batch using Waymax operations
+                    # batch_scenarios has shape (num_devices, num_envs, ...)
+                    # First, get device 0 scenarios: shape (num_envs, ...)
+                    device_0_scenarios = jax.tree_map(lambda x: x[0] if x.ndim > 0 else x, batch_scenarios)
+                    
+                    # Then use operations.dynamic_index to extract single scenario with keepdims=False
+                    # This properly reduces SimulatorState.shape to ()
+                    idx = sample_idx % device_0_scenarios.shape[0] if device_0_scenarios.shape else 0
+                    single_scenario = operations.dynamic_index(device_0_scenarios, idx, keepdims=False)
                     
                     # Reset extraction environment to get observation
                     rng, sample_key = jax.random.split(rng)
