@@ -25,6 +25,8 @@ from vmax.agents.pipeline import inference, pmap
 from vmax.scripts.training import train_utils
 from vmax.simulator import metrics as _metrics
 
+from waymax import dynamics
+
 from xai.attention_logger import AttentionLogger
 
 
