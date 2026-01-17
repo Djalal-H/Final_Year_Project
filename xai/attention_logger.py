@@ -184,11 +184,10 @@ class AttentionLogger:
             state = simulator_state
             
             # Get current trajectory slice
+            # timestep can be multi-dimensional for batched training (e.g., [num_devices, batch_size])
             timestep = jax.device_get(state.timestep)
-            if hasattr(timestep, '__len__') and len(timestep) > 0:
-                timestep = int(timestep[0]) if timestep.ndim > 0 else int(timestep)
-            else:
-                timestep = int(timestep)
+            timestep = np.array(timestep).flatten()
+            timestep = int(timestep[0])  # Use first timestep for all samples
             
             traj = state.sim_trajectory
             
