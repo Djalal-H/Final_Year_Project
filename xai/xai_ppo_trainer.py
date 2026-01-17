@@ -300,12 +300,12 @@ def train(
                 )
                 
                 # Reset environment to get observations
+                # Note: env is already wrapped with VmapWrapper, so reset expects batched inputs
                 rng, attn_key = jax.random.split(rng)
                 reset_keys = jax.random.split(attn_key, attention_n_samples)
                 
-                # Vmap over samples to get observations
-                vmapped_reset = jax.vmap(env.reset)
-                env_states = vmapped_reset(sample_scenario, reset_keys)
+                # Call reset directly (no extra vmap needed)
+                env_states = env.reset(sample_scenario, reset_keys)
                 obs = env_states.observation
                 
                 # Extract attention weights (single device, JIT compiled)
