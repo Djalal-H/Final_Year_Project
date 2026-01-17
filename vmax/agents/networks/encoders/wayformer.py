@@ -30,6 +30,7 @@ class WayformerAttention(nn.Module):
         ff_mult: Feedforward multiplier.
         attn_dropout: Dropout factor in attention.
         ff_dropout: Dropout factor in feedforward network.
+        return_attention_weights: If True, return attention weights for XAI analysis.
 
     """
 
@@ -40,6 +41,7 @@ class WayformerAttention(nn.Module):
     ff_mult: int = 1
     attn_dropout: float = 0.0
     ff_dropout: float = 0.0
+    return_attention_weights: bool = False
 
     @nn.compact
     def __call__(self, x, mask=None):
@@ -50,13 +52,20 @@ class WayformerAttention(nn.Module):
             mask: Input mask.
 
         Returns:
-            Output tensor.
+            If return_attention_weights=False: Output latent tensor.
+            If return_attention_weights=True: Tuple of (latent, attention_dict).
+                attention_dict contains:
+                    - 'cross_attn_0': Cross-attention weights [batch, latents, context, heads]
+                    - 'self_attn_1', 'self_attn_2', ...: Self-attention weights
 
         """
         bs, dim = x.shape[0], x.shape[-1]
         latents = self.param("latents", init.normal(), (self.num_latents, dim * self.ff_mult))
         latent = einops.repeat(latents, "n d -> b n d", b=bs)
         x = einops.rearrange(x, "b n ... -> b n (...)")
+
+        # Storage for attention weights
+        attention_weights = {} if self.return_attention_weights else None
 
         attn = partial(
             encoders.AttentionLayer,
@@ -65,15 +74,35 @@ class WayformerAttention(nn.Module):
             dropout=self.attn_dropout,
         )
         ff = partial(encoders.FeedForward, mult=self.ff_mult, dropout=self.ff_dropout)
+        
+        # Cross-attention (attn_0) - most important for XAI
+        # Shows which input entities (vehicles, road, etc.) influenced the decision
         rz = encoders.ReZero(name="rezero_0")
-        latent += rz(attn(name="attn_0")(latent, x, mask_k=mask))
+        if self.return_attention_weights:
+            attn_out, attn_w = attn(return_attention_weights=True, name="attn_0")(
+                latent, x, mask_k=mask
+            )
+            latent += rz(attn_out)
+            attention_weights['cross_attn_0'] = attn_w
+        else:
+            latent += rz(attn(name="attn_0")(latent, x, mask_k=mask))
         latent += rz(ff(name="ff_0")(latent))
 
+        # Self-attention layers (attn_1, attn_2, ...) - show how latents interact
         for i in range(1, self.depth):
             rz = encoders.ReZero(name=f"rezero_{i}")
-            latent += rz(attn(name=f"attn_{i}")(latent))
+            if self.return_attention_weights:
+                attn_out, attn_w = attn(return_attention_weights=True, name=f"attn_{i}")(
+                    latent
+                )
+                latent += rz(attn_out)
+                attention_weights[f'self_attn_{i}'] = attn_w
+            else:
+                latent += rz(attn(name=f"attn_{i}")(latent))
             latent += rz(ff(name=f"ff_{i}")(latent))
 
+        if self.return_attention_weights:
+            return latent, attention_weights
         return latent
 
 
@@ -95,6 +124,7 @@ class WayformerEncoder(nn.Module):
         attn_dropout: Dropout probability in attention.
         ff_dropout: Dropout probability in the feedforward network.
         fusion_type: Fusion strategy.
+        return_attention_weights: If True, return attention weights for XAI analysis.
 
     """
 
@@ -110,16 +140,20 @@ class WayformerEncoder(nn.Module):
     attn_dropout: float = 0.0
     ff_dropout: float = 0.0
     fusion_type: str = "late"
+    return_attention_weights: bool = False
 
     @nn.compact
-    def __call__(self, obs: jax.Array) -> jax.Array:
+    def __call__(self, obs: jax.Array):
         """Forward pass of the Wayformer encoder.
 
         Args:
             obs: Input observation tensor.
 
         Returns:
-            Output encoded tensor.
+            If return_attention_weights=False: Output encoded tensor.
+            If return_attention_weights=True: Tuple of (output, attention_dict).
+                attention_dict contains attention weights from all modalities,
+                prefixed by modality name (e.g., 'sdc_traj/cross_attn_0').
 
         """
         features, masks = self.unflatten_fn(obs)
@@ -199,6 +233,9 @@ class WayformerEncoder(nn.Module):
         tl_valid_mask = einops.rearrange(tl_valid_mask, "b n t -> b (n t)")
         gps_path_mask = jnp.ones(gps_path_encoding.shape[:-1])
 
+        # Storage for attention weights from all modalities
+        all_attention_weights = {} if self.return_attention_weights else None
+
         # Only self attention mechanism in wayformer
         self_attn = partial(
             WayformerAttention,
@@ -209,6 +246,19 @@ class WayformerEncoder(nn.Module):
             attn_dropout=self.attn_dropout,
             ff_dropout=self.ff_dropout,
         )
+
+        # Helper to collect attention with optional prefix
+        def call_attn_with_weights(attn_module, embeddings, mask, prefix):
+            if self.return_attention_weights:
+                out, attn_w = attn_module(
+                    return_attention_weights=True
+                )(embeddings, mask)
+                # Prefix attention keys with modality name
+                for k, v in attn_w.items():
+                    all_attention_weights[f'{prefix}/{k}'] = v
+                return out
+            else:
+                return attn_module()(embeddings, mask)
 
         # Early Fusion - fuse after attention for all types of features
         if self.fusion_type == "early":
@@ -227,25 +277,46 @@ class WayformerEncoder(nn.Module):
                 ],
                 axis=1,
             )
-            output = self_attn(depth=self.attention_depth, name="concat_attention")(
+            output = call_attn_with_weights(
+                partial(self_attn, depth=self.attention_depth, name="concat_attention"),
                 concat_embeddings,
                 concat_masks,
+                "concat"
             )
 
         elif self.fusion_type == "late":
             # Late Fusion - fuse after attention for all types of features
             # Self attention all features embeddings
-            output_sdc_traj = self_attn(depth=self.attention_depth, name="sdc_traj_attention")(
+            output_sdc_traj = call_attn_with_weights(
+                partial(self_attn, depth=self.attention_depth, name="sdc_traj_attention"),
                 sdc_traj_encoding,
                 sdc_traj_valid_mask,
+                "sdc_traj"
             )
-            output_other_traj = self_attn(depth=self.attention_depth, name="other_traj_attention")(
+            output_other_traj = call_attn_with_weights(
+                partial(self_attn, depth=self.attention_depth, name="other_traj_attention"),
                 other_traj_encoding,
                 other_traj_valid_mask,
+                "other_traj"
             )
-            output_rg = self_attn(depth=self.attention_depth, name="rg_attention")(rg_encoding, rg_valid_mask)
-            output_tl = self_attn(depth=self.attention_depth, name="tl_attention")(tl_encoding, tl_valid_mask)
-            output_gps_path = self_attn(depth=self.attention_depth, name="gps_path_attention")(gps_path_encoding)
+            output_rg = call_attn_with_weights(
+                partial(self_attn, depth=self.attention_depth, name="rg_attention"),
+                rg_encoding,
+                rg_valid_mask,
+                "roadgraph"
+            )
+            output_tl = call_attn_with_weights(
+                partial(self_attn, depth=self.attention_depth, name="tl_attention"),
+                tl_encoding,
+                tl_valid_mask,
+                "traffic_lights"
+            )
+            output_gps_path = call_attn_with_weights(
+                partial(self_attn, depth=self.attention_depth, name="gps_path_attention"),
+                gps_path_encoding,
+                None,  # GPS path has no mask (all valid)
+                "gps_path"
+            )
 
             # [B,M,D]
             output = jnp.concatenate(
@@ -255,17 +326,36 @@ class WayformerEncoder(nn.Module):
 
         elif self.fusion_type == "hierarchical":
             # Do both attention for each features + self attention after concatenation
-            output_sdc_traj = self_attn(depth=self.attention_depth, name="sdc_traj_attention")(
+            output_sdc_traj = call_attn_with_weights(
+                partial(self_attn, depth=self.attention_depth, name="sdc_traj_attention"),
                 sdc_traj_encoding,
                 sdc_traj_valid_mask,
+                "sdc_traj"
             )
-            output_other_traj = self_attn(depth=self.attention_depth, name="other_traj_attention")(
+            output_other_traj = call_attn_with_weights(
+                partial(self_attn, depth=self.attention_depth, name="other_traj_attention"),
                 other_traj_encoding,
                 other_traj_valid_mask,
+                "other_traj"
             )
-            output_rg = self_attn(depth=self.attention_depth, name="rg_attention")(rg_encoding, rg_valid_mask)
-            output_tl = self_attn(depth=self.attention_depth, name="tl_attention")(tl_encoding, tl_valid_mask)
-            output_gps_path = self_attn(depth=self.attention_depth, name="gps_path_attention")(gps_path_encoding)
+            output_rg = call_attn_with_weights(
+                partial(self_attn, depth=self.attention_depth, name="rg_attention"),
+                rg_encoding,
+                rg_valid_mask,
+                "roadgraph"
+            )
+            output_tl = call_attn_with_weights(
+                partial(self_attn, depth=self.attention_depth, name="tl_attention"),
+                tl_encoding,
+                tl_valid_mask,
+                "traffic_lights"
+            )
+            output_gps_path = call_attn_with_weights(
+                partial(self_attn, depth=self.attention_depth, name="gps_path_attention"),
+                gps_path_encoding,
+                None,
+                "gps_path"
+            )
 
             # [B,M,D]
             output = jnp.concatenate(
@@ -274,11 +364,16 @@ class WayformerEncoder(nn.Module):
             )
 
             # Self attention after concatenation of single attention per features
-            output = self_attn(depth=self.attention_depth, name="concat_attention")(
+            output = call_attn_with_weights(
+                partial(self_attn, depth=self.attention_depth, name="concat_attention"),
                 output,
                 None,
+                "concat_hierarchical"
             )
 
         # average over latent dimensions
         output = output.mean(axis=1)
+        
+        if self.return_attention_weights:
+            return output, all_attention_weights
         return output

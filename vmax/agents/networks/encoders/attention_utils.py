@@ -100,15 +100,17 @@ class AttentionLayer(nn.Module):
         heads: Number of attention heads.
         head_features: Feature size per head.
         dropout: Dropout probability.
+        return_attention_weights: If True, return attention weights for XAI analysis.
 
     """
 
     heads: int = 8
     head_features: int = 64
     dropout: float = 0.0
+    return_attention_weights: bool = False
 
     @nn.compact
-    def __call__(self, x: jax.Array, context=None, mask_k=None, mask_q=None, deterministic: bool = False) -> jax.Array:
+    def __call__(self, x: jax.Array, context=None, mask_k=None, mask_q=None, deterministic: bool = False):
         """Perform attention on the input.
 
         Args:
@@ -119,7 +121,9 @@ class AttentionLayer(nn.Module):
             deterministic: If True, disables dropout.
 
         Returns:
-            Output tensor after attention.
+            If return_attention_weights=False: Output tensor after attention.
+            If return_attention_weights=True: Tuple of (output tensor, attention weights).
+                Attention weights shape: [batch, queries, keys, heads]
 
         """
         # mask is on context(k)
@@ -141,12 +145,18 @@ class AttentionLayer(nn.Module):
             sim = jnp.where(mask_q[:, :, None, None], sim, big_neg)
 
         attn = nn.softmax(sim, axis=-2)  # -2 we kept h dim in matrix (could we merge h with b ?)
+        
+        # Store attention weights before dropout for XAI analysis
+        attn_weights_for_analysis = attn if self.return_attention_weights else None
+        
         out = jnp.einsum("b i j h, b j h d -> b i h d", attn, v)
         out = einops.rearrange(out, "b n h d -> b n (h d)", h=h)
 
         out = nn.Dense(x.shape[-1])(out)
         out = nn.Dropout(self.dropout)(out, deterministic=deterministic)
 
+        if self.return_attention_weights:
+            return out, attn_weights_for_analysis
         return out
 
 
@@ -157,12 +167,14 @@ class LocalAttentionLayer(nn.Module):
         heads: Number of attention heads.
         head_features: Feature size per head.
         dropout: Dropout probability.
+        return_attention_weights: If True, return attention weights for XAI analysis.
 
     """
 
     heads: int = 8
     head_features: int = 64
     dropout: float = 0.0
+    return_attention_weights: bool = False
 
     @nn.compact
     def __call__(
@@ -173,7 +185,7 @@ class LocalAttentionLayer(nn.Module):
         mask_q=None,
         mask_k=None,
         deterministic: bool = False,
-    ) -> jax.Array:
+    ):
         """Apply local attention via nearest neighbor selections.
 
         Args:
@@ -185,7 +197,9 @@ class LocalAttentionLayer(nn.Module):
             deterministic: If True, disables dropout.
 
         Returns:
-            Output tensor after local attention.
+            If return_attention_weights=False: Output tensor after local attention.
+            If return_attention_weights=True: Tuple of (output tensor, attention weights).
+                Attention weights shape: [batch, queries, k_neighbors, heads]
 
         """
         # masqk_q: [B,Nq]
@@ -217,10 +231,16 @@ class LocalAttentionLayer(nn.Module):
             sim = jnp.where(mask[:, :, :, None], sim, big_neg)
 
         attn = nn.softmax(sim, axis=-2)  # [B,Nq,k,H]
+        
+        # Store attention weights before output computation for XAI analysis
+        attn_weights_for_analysis = attn if self.return_attention_weights else None
+        
         out = jnp.einsum("b i k h, b i k h d -> b i h d", attn, v)
         out = einops.rearrange(out, "b n h d -> b n (h d)", h=h)  # [B,Nq,d]
 
         out = nn.Dense(x.shape[-1])(out)
         out = nn.Dropout(self.dropout)(out, deterministic=deterministic)
 
+        if self.return_attention_weights:
+            return out, attn_weights_for_analysis
         return out

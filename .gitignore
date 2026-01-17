@@ -5,3 +5,8 @@
 # Local data
 mini_datasets/
 
+#virtual environment
+vmax_venv
+
+#video data
+videos
