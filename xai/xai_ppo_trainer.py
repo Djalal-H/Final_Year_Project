@@ -296,15 +296,17 @@ def train(
                 all_attention_weights = []
                 
                 for sample_idx in range(attention_n_samples):
-                    # Extract single scenario from batch
+                    # Extract single scenario from batch (keep batch dim of 1)
                     single_scenario = jax.tree_map(
-                        lambda x: x[0, sample_idx] if x.ndim > 1 else x[sample_idx], 
+                        lambda x: x[0, sample_idx:sample_idx+1] if x.ndim > 1 else x[sample_idx:sample_idx+1], 
                         batch_scenarios
                     )
                     
                     # Reset environment to get observation
                     rng, sample_key = jax.random.split(rng)
-                    env_state = env.reset(single_scenario, sample_key)
+                    # VmapWrapper expects batched RNG keys
+                    sample_keys = jax.random.split(sample_key, 1)  # shape: (1, 2)
+                    env_state = env.reset(single_scenario, sample_keys)
                     obs = env_state.observation
                     
                     # obs is already batched by VmapWrapper, take first element for single-device inference
