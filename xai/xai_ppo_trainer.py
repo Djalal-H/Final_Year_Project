@@ -282,9 +282,12 @@ def train(
         epoch_log_time = perf_counter() - t
 
         # Attention logging (XAI) - Online extraction
+        # Log every N iterations (more reliable than step-based since steps don't align)
         t = perf_counter()
-        if attention_logger and attention_extractor and current_step % attention_log_freq == 0 and current_step > 0:
-            print(f"[XAI] Extracting attention weights at step {current_step}...")
+        log_interval_iters = max(1, attention_log_freq // env_step_per_training_step)
+        should_log = attention_logger and attention_extractor and iter > 0 and iter % log_interval_iters == 0
+        if should_log:
+            print(f"[XAI] Extracting attention weights at step {current_step} (iteration {iter})...")
             try:
                 # Get current params (un-pmap to single device)
                 single_params = pmap.unpmap(training_state.params)
