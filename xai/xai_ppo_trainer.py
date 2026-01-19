@@ -334,6 +334,8 @@ def train(
                     
                     # Reset extraction environment to get observation
                     rng, sample_key = jax.random.split(rng)
+                    print("Singal scenario shape and Type: ", single_scenario.shape, type(single_scenario))
+                    print("Sample Key shape and Type: ", sample_key.shape, type(sample_key))
                     env_state = extraction_env.reset(single_scenario, sample_key)
                     obs = env_state.observation
                     
