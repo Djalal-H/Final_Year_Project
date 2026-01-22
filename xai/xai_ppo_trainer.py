@@ -327,15 +327,16 @@ def train(
                     # First, get device 0 scenarios: shape (num_envs, ...)
                     device_0_scenarios = jax.tree_map(lambda x: x[0] if x.ndim > 0 else x, batch_scenarios)
                     
-                    # Then use operations.dynamic_index to extract single scenario with keepdims=False
-                    # This properly reduces SimulatorState.shape to ()
+                    # Then use python slicing to extract single scenario
+                    # This guarantees we get a scalar SimulatorState (shape ())
                     idx = sample_idx % device_0_scenarios.shape[0] if device_0_scenarios.shape else 0
-                    single_scenario = operations.dynamic_index(device_0_scenarios, idx, keepdims=False)
+                    single_scenario = jax.tree_map(lambda x: x[idx] if x.ndim > 0 else x, device_0_scenarios)
                     
                     # Extract observation directly from scenario without a full environment reset
                     rng, sample_key = jax.random.split(rng)
                     print("Single Scenario shape: ", single_scenario.shape)
-                    print("sample key : ", sample_key)
+                    print("Single Scenario : ", single_scenario)
+                
                     obs = extraction_env.observe(single_scenario)
                     
                     # Extract attention weights (single device, JIT compiled)
