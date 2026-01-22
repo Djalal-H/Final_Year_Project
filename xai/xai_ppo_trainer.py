@@ -332,12 +332,9 @@ def train(
                     idx = sample_idx % device_0_scenarios.shape[0] if device_0_scenarios.shape else 0
                     single_scenario = operations.dynamic_index(device_0_scenarios, idx, keepdims=False)
                     
-                    # Reset extraction environment to get observation
+                    # Extract observation directly from scenario without a full environment reset
                     rng, sample_key = jax.random.split(rng)
-                    print("Singal scenario shape and Type: ", single_scenario.shape, type(single_scenario))
-                    print("Sample Key shape and Type: ", sample_key.shape, type(sample_key))
-                    env_state = extraction_env.reset(single_scenario, sample_key)
-                    obs = env_state.observation
+                    obs = extraction_env.observe(single_scenario, key=sample_key)
                     
                     # Extract attention weights (single device, JIT compiled)
                     attn_weights = attention_extractor(single_params.policy, obs)
