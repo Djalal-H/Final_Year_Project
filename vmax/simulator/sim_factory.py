@@ -90,8 +90,8 @@ def make_env(
     for key in metrics._VMAX_METRICS_REGISTRY:
         try:
             waymax_metrics.register_metric(key, metrics.get_metrics(key))
-        except ValueError:
-            # Metric already registered, skip
+        except Exception:
+            # Metric already registered or error in registration, skip
             pass
 
     env_config = _config.EnvironmentConfig(
@@ -235,8 +235,8 @@ def make_multi_agent_env_for_evaluation(
     for key in metrics._VMAX_METRICS_REGISTRY:
         try:
             waymax_metrics.register_metric(key, metrics.get_metrics(key))
-        except ValueError:
-            # Metric already registered, skip
+        except Exception:
+            # Metric already registered or error in registration, skip
             pass
 
     init_steps = 1 if noisy_init else 11
