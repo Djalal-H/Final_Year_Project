@@ -334,7 +334,7 @@ def train(
                     
                     # Extract observation directly from scenario without a full environment reset
                     rng, sample_key = jax.random.split(rng)
-                    obs = extraction_env.observe(single_scenario, key=sample_key)
+                    obs = extraction_env.observe(single_scenario)
                     
                     # Extract attention weights (single device, JIT compiled)
                     attn_weights = attention_extractor(single_params.policy, obs)
