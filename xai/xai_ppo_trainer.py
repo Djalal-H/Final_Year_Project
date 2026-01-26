@@ -106,7 +106,10 @@ def extract_attention_online(
         if hasattr(single_scenario, 'roadgraph_points'):
             print(f"[XAI DEBUG]   roadgraph.x shape: {single_scenario.roadgraph_points.x.shape}")
         if hasattr(single_scenario, 'timestep'):
-            print(f"[XAI DEBUG]   timestep shape/value: {single_scenario.timestep.shape if hasattr(single_scenario.timestep, 'shape') else single_scenario.timestep}")
+            ts = single_scenario.timestep
+            ts_shape = ts.shape if hasattr(ts, 'shape') else 'scalar'
+            ts_value = int(ts) if hasattr(ts, 'item') else ts
+            print(f"[XAI DEBUG]   timestep shape: {ts_shape}, value: {ts_value}")
         if hasattr(single_scenario, 'sim_trajectory'):
             print(f"[XAI DEBUG]   sim_trajectory.x shape: {single_scenario.sim_trajectory.x.shape}")
             print(f"[XAI DEBUG]   sim_trajectory.yaw shape: {single_scenario.sim_trajectory.yaw.shape}")
@@ -115,10 +118,16 @@ def extract_attention_online(
                 print(f"[XAI DEBUG]   is_sdc shape: {single_scenario.object_metadata.is_sdc.shape}")
         
         # Now apply squeeze to remove any remaining singleton dimensions
-        single_scenario = jax.tree_util.tree_map(
-            lambda x: x.squeeze() if hasattr(x, 'squeeze') else x,
-            single_scenario
-        )
+        # BUT preserve timestep as integer if it's a scalar
+        def smart_squeeze(x):
+            if not hasattr(x, 'squeeze'):
+                return x
+            # Don't squeeze scalars (0-d arrays)
+            if hasattr(x, 'ndim') and x.ndim == 0:
+                return x
+            return x.squeeze()
+        
+        single_scenario = jax.tree_util.tree_map(smart_squeeze, single_scenario)
         
         # Debug: Check final shape after squeeze
         print(f"[XAI DEBUG] After squeeze:")
@@ -126,6 +135,11 @@ def extract_attention_online(
             print(f"[XAI DEBUG]   roadgraph.x shape: {single_scenario.roadgraph_points.x.shape}")
         if hasattr(single_scenario, 'sim_trajectory'):
             print(f"[XAI DEBUG]   sim_trajectory.yaw shape: {single_scenario.sim_trajectory.yaw.shape}")
+        if hasattr(single_scenario, 'timestep'):
+            ts = single_scenario.timestep
+            ts_shape = ts.shape if hasattr(ts, 'shape') else 'scalar'
+            ts_value = int(ts) if hasattr(ts, 'item') else ts
+            print(f"[XAI DEBUG]   timestep shape: {ts_shape}, value: {ts_value}")
         
         # Get observation for single scenario
         try:
