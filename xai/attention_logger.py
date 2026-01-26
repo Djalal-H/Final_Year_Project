@@ -142,7 +142,17 @@ class AttentionLogger:
                 'num_latents': self.config.get('num_latents', 64),
                 'fusion_type': self.config.get('fusion_type', 'late'),
                 'head_features': self.config.get('latent_head_features', 64),
-            }
+            },
+            # Summary for quick inspection without loading full arrays
+            'attention_summary': {
+                key: {
+                    'shape': list(arr.shape),
+                    'mean': float(arr.mean()),
+                    'std': float(arr.std()),
+                    'max': float(arr.max()),
+                }
+                for key, arr in subsampled_attention.items()
+            } if subsampled_attention else {}
         }
         
         # Submit async save

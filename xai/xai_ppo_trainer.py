@@ -22,11 +22,64 @@ from tqdm import tqdm
 from vmax.agents import datatypes, pipeline
 from vmax.agents.learning.reinforcement import ppo
 from vmax.agents.pipeline import inference, pmap
+from vmax.agents.networks import encoders, network_utils
 from vmax.scripts.training import train_utils
 from vmax.simulator import metrics as _metrics
 
 
 from xai.attention_logger import AttentionLogger
+
+
+def extract_attention_online(
+    env,
+    params,
+    network_config: dict,
+    observations: jax.Array,
+) -> dict:
+    """Extract attention weights from encoder during training.
+    
+    Uses the trained encoder parameters to compute attention weights
+    for the given observations. This enables online (real-time) attention
+    analysis during training.
+    
+    Args:
+        env: The environment (used to get unflatten_fn).
+        params: Current training parameters (PPONetworkParams).
+        network_config: Network configuration dictionary.
+        observations: Flattened observation tensor.
+        
+    Returns:
+        Dictionary of attention weights from WayformerEncoder.
+    """
+    # Get unflatten function from environment
+    unflatten_fn = env.get_wrapper_attr("features_extractor").unflatten_features
+    
+    # Parse and convert encoder config
+    encoder_cfg = network_config.get('encoder', {})
+    encoder_cfg = network_utils.parse_config(encoder_cfg, "encoder")
+    encoder_cfg = network_utils.convert_to_dict_with_activation_fn(encoder_cfg)
+    
+    # Build encoder with return_attention_weights=True
+    encoder = encoders.WayformerEncoder(
+        unflatten_fn,
+        return_attention_weights=True,
+        **encoder_cfg
+    )
+    
+    # Extract encoder params from policy params
+    if 'params' in params.policy and 'encoder_layer' in params.policy['params']:
+        encoder_params = params.policy['params']['encoder_layer']
+    else:
+        raise ValueError("Could not find 'encoder_layer' in policy params")
+    
+    # Add batch dimension if needed
+    if observations.ndim == 1:
+        observations = jnp.expand_dims(observations, axis=0)
+    
+    # Run forward pass with attention extraction
+    _, attention_weights = encoder.apply({'params': encoder_params}, observations)
+    
+    return attention_weights
 
 
 
@@ -227,32 +280,47 @@ def train(
 
         epoch_log_time = perf_counter() - t
 
-        # Attention logging (XAI) - Semantic features only (offline extraction)
+        # Attention logging (XAI) - Online attention extraction
         # Log every N iterations (more reliable than step-based since steps don't align)
         t = perf_counter()
         log_interval_iters = max(1, attention_log_freq // env_step_per_training_step)
         should_log = attention_logger and iter > 0 and iter % log_interval_iters == 0
         if should_log:
-            print(f"[XAI] Logging semantic features at step {current_step} (iteration {iter})...")
+            print(f"[XAI] Extracting & logging attention at step {current_step} (iteration {iter})...")
             try:
-                # Get sample scenarios for semantic feature extraction
+                # Get sample scenarios for attention extraction
                 sample_scenarios = jax.tree_map(
                     lambda x: x[0, :attention_n_samples] if x.ndim > 1 else x[:attention_n_samples], 
                     batch_scenarios
                 )
                 
-                # Log with empty attention weights (will be extracted offline)
+                # Get observations from sample scenarios
+                sample_obs = env.observe(sample_scenarios)
+                
+                # Extract real attention weights online
+                current_params = pmap.unpmap(training_state.params)
+                attention_weights = extract_attention_online(
+                    env, current_params, network_config, sample_obs
+                )
+                # Convert to numpy for logging
+                attention_weights = jax.tree_util.tree_map(
+                    lambda x: np.array(jax.device_get(x)), 
+                    attention_weights
+                )
+                
+                # Log attention weights with semantic features
                 attention_logger.log(
                     step=current_step,
-                    attention_weights={},  # Empty - offline extraction only
+                    attention_weights=attention_weights,
                     simulator_state=sample_scenarios,
                     n_samples=attention_n_samples
                 )
-                print(f"[XAI] Successfully logged semantic features for step {current_step}")
-                metrics["xai/semantic_log_count"] = current_step // attention_log_freq
+                print(f"[XAI] Successfully logged attention for step {current_step}")
+                print(f"[XAI] Attention keys: {list(attention_weights.keys())}")
+                metrics["xai/attention_log_count"] = current_step // attention_log_freq
                 
             except Exception as e:
-                print(f"[XAI] Warning: Semantic logging failed at step {current_step}: {e}")
+                print(f"[XAI] Warning: Attention logging failed at step {current_step}: {e}")
                 import traceback
                 traceback.print_exc()
 
