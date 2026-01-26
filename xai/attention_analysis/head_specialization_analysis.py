@@ -12,13 +12,28 @@ Key Concepts:
 - Primary Function: The semantic feature with strongest correlation for each head
 - Head Function Registry: Maps heads to interpretable function labels
 
+Data Sources:
+    This analysis requires data from TWO directories:
+    1. feature_dir: Training logs with semantic features (from AttentionLogger)
+       Located at: runs/{model}/attention_logs/
+    2. attention_dir: Offline extracted attention weights
+       Located at: xai/attention_analysis/attention_extractions/
+
 Usage:
-    # Load and analyze attention logs
-    analyzer = HeadSpecializationAnalyzer(log_dir="path/to/attention_logs")
+    # Load and analyze attention logs from both directories
+    analyzer = HeadSpecializationAnalyzer(
+        feature_dir="runs/PPO_VEC_WAYFORMER/attention_logs",
+        attention_dir="xai/attention_analysis/attention_extractions"
+    )
     analyzer.load_data()
     results = analyzer.compute_hsi()
     analyzer.export_registry("head_functions.json")
-    analyzer.plot_all("output_dir/")
+    
+    # Or via CLI:
+    # python head_specialization_analysis.py \\
+    #     --feature_dir runs/PPO_VEC_WAYFORMER/attention_logs \\
+    #     --attention_dir xai/attention_analysis/attention_extractions \\
+    #     --output_dir hsi_results
 """
 
 import glob
@@ -117,68 +132,95 @@ DEFAULT_LABEL = {
 # ==============================================================================
 
 class AttentionLogLoader:
-    """Load and manage attention log files."""
+    """Load and merge attention logs from training and offline extraction.
+    
+    This loader requires data from TWO directories:
+    1. feature_dir: Training logs with semantic features (from AttentionLogger)
+    2. attention_dir: Offline extracted attention weights
+    
+    Files are matched by sorted order (assumes parallel naming convention).
+    """
     
     def __init__(
         self,
-        log_dir: str,
-        pattern: str = "attention_log_*.pkl",
-        fallback_pattern: str = "attention_scenario_*.pkl"
+        feature_dir: str,
+        attention_dir: str,
+        feature_pattern: str = "attention_log_*.pkl",
+        attention_pattern: str = "attention_scenario_*.pkl"
     ):
         """
         Initialize the loader.
         
         Args:
-            log_dir: Directory containing attention log files.
-            pattern: Glob pattern for training log files.
-            fallback_pattern: Alternative pattern for offline extractions.
+            feature_dir: Directory containing training logs (semantic features).
+            attention_dir: Directory containing offline extractions (attention weights).
+            feature_pattern: Glob pattern for feature log files.
+            attention_pattern: Glob pattern for attention log files.
         """
-        self.log_dir = log_dir
-        self.pattern = pattern
-        self.fallback_pattern = fallback_pattern
+        self.feature_dir = feature_dir
+        self.attention_dir = attention_dir
+        self.feature_pattern = feature_pattern
+        self.attention_pattern = attention_pattern
         self.logs: List[AttentionLog] = []
         
-    def discover_files(self) -> List[str]:
-        """Find all attention log files in the directory."""
-        files = sorted(glob.glob(os.path.join(self.log_dir, self.pattern)))
+    def discover_files(self) -> Tuple[List[str], List[str]]:
+        """Find log files in both directories."""
+        feature_files = sorted(glob.glob(os.path.join(self.feature_dir, self.feature_pattern)))
+        attention_files = sorted(glob.glob(os.path.join(self.attention_dir, self.attention_pattern)))
         
-        # Try fallback pattern if primary pattern finds nothing
-        if not files:
-            files = sorted(glob.glob(os.path.join(self.log_dir, self.fallback_pattern)))
+        if not feature_files:
+            print(f"[AttentionLogLoader] Warning: No feature logs found in {self.feature_dir}")
+        if not attention_files:
+            print(f"[AttentionLogLoader] Warning: No attention logs found in {self.attention_dir}")
             
-        return files
+        return feature_files, attention_files
     
     def load(self, step_range: Optional[Tuple[int, int]] = None) -> List[AttentionLog]:
         """
-        Load all attention logs from the directory.
+        Load and merge logs from both directories.
+        
+        Assumes files correspond 1-to-1 when sorted by name.
         
         Args:
             step_range: Optional (start, end) tuple to filter by training step.
-                       Only applies to training logs with step info.
         
         Returns:
-            List of AttentionLog objects.
+            List of AttentionLog objects with merged data.
         """
-        files = self.discover_files()
+        feature_files, attention_files = self.discover_files()
         
-        if not files:
+        if not feature_files or not attention_files:
             raise FileNotFoundError(
-                f"No attention logs found in {self.log_dir} "
-                f"with pattern '{self.pattern}' or '{self.fallback_pattern}'"
+                "Missing required log files. Need both:\n"
+                f"- Training logs (semantic features) in {self.feature_dir}\n"
+                f"- Extracted attention weights in {self.attention_dir}"
             )
+            
+        if len(feature_files) != len(attention_files):
+            print(f"[AttentionLogLoader] Warning: Mismatch in file counts "
+                  f"({len(feature_files)} features vs {len(attention_files)} attention). "
+                  f"Will load intersection.")
+            min_len = min(len(feature_files), len(attention_files))
+            feature_files = feature_files[:min_len]
+            attention_files = attention_files[:min_len]
         
-        print(f"[AttentionLogLoader] Found {len(files)} log files")
+        print(f"[AttentionLogLoader] Loading/merging {len(feature_files)} log pairs...")
         
         self.logs = []
-        for filepath in files:
+        for feat_path, attn_path in zip(feature_files, attention_files):
             try:
-                with open(filepath, 'rb') as f:
-                    data = pickle.load(f)
+                # Load features from training log
+                with open(feat_path, 'rb') as f:
+                    feat_data = pickle.load(f)
                 
-                # Handle different log formats
-                log = self._parse_log(data, filepath)
+                # Load attention from extraction log
+                with open(attn_path, 'rb') as f:
+                    attn_data = pickle.load(f)
                 
-                # Apply step filter if specified
+                # Merge data
+                log = self._merge_logs(feat_data, attn_data, feat_path)
+                
+                # Apply step filter
                 if step_range is not None:
                     if log.step < step_range[0] or log.step > step_range[1]:
                         continue
@@ -186,39 +228,27 @@ class AttentionLogLoader:
                 self.logs.append(log)
                 
             except Exception as e:
-                print(f"[AttentionLogLoader] Warning: Could not load {filepath}: {e}")
+                print(f"[AttentionLogLoader] Warning: Could not load pair ({feat_path}, {attn_path}): {e}")
         
-        print(f"[AttentionLogLoader] Loaded {len(self.logs)} logs")
+        print(f"[AttentionLogLoader] Successfully loaded {len(self.logs)} logs")
         return self.logs
     
-    def _parse_log(self, data: Dict, filepath: str) -> AttentionLog:
-        """Parse a loaded pickle file into an AttentionLog object."""
-        # Training log format (from AttentionLogger)
-        if 'step' in data and 'attention_weights' in data:
-            return AttentionLog(
-                step=data['step'],
-                attention_weights=data['attention_weights'],
-                semantic_features=data.get('semantic_features', {}),
-                token_boundaries=data.get('token_boundaries', {}),
-                config=data.get('config', {})
-            )
+    def _merge_logs(self, feat_data: Dict, attn_data: Dict, feat_path: str) -> AttentionLog:
+        """Merge feature data and attention data into one log object."""
+        # Primary metadata comes from feature/training log
+        step = feat_data.get('step', 0)
         
-        # Offline extraction format (from notebook)
-        elif 'attention_weights' in data and 'success' in data:
-            # Extract step from filename if possible
-            basename = os.path.basename(filepath)
-            step = self._extract_step_from_filename(basename)
+        # If step missing, try to infer from filename
+        if step == 0:
+            step = self._extract_step_from_filename(os.path.basename(feat_path))
             
-            return AttentionLog(
-                step=step,
-                attention_weights=data['attention_weights'],
-                semantic_features={},  # Not included in offline extractions
-                token_boundaries={},
-                config={}
-            )
-        
-        else:
-            raise ValueError(f"Unknown log format in {filepath}")
+        return AttentionLog(
+            step=step,
+            attention_weights=attn_data['attention_weights'],  # Use extracted attention
+            semantic_features=feat_data.get('semantic_features', {}),  # Use training features
+            token_boundaries=feat_data.get('token_boundaries', {}),
+            config=feat_data.get('config', {})
+        )
     
     def _extract_step_from_filename(self, filename: str) -> int:
         """Extract step number from filename like 'attention_log_00001000.pkl'."""
@@ -256,17 +286,20 @@ class HeadSpecializationAnalyzer:
     
     def __init__(
         self,
-        log_dir: Optional[str] = None,
+        feature_dir: Optional[str] = None,
+        attention_dir: Optional[str] = None,
         logs: Optional[List[AttentionLog]] = None
     ):
         """
         Initialize the analyzer.
         
         Args:
-            log_dir: Directory containing attention logs (will load automatically).
+            feature_dir: Directory containing training logs (semantic features).
+            attention_dir: Directory containing offline extractions (attention weights).
             logs: Pre-loaded list of AttentionLog objects.
         """
-        self.log_dir = log_dir
+        self.feature_dir = feature_dir
+        self.attention_dir = attention_dir
         self._logs: List[AttentionLog] = logs or []
         self._result: Optional[HSIResult] = None
         
@@ -275,11 +308,11 @@ class HeadSpecializationAnalyzer:
         self._feature_arrays: Dict[str, np.ndarray] = {}  # Feature -> (N, V)
         
     def load_data(self, step_range: Optional[Tuple[int, int]] = None):
-        """Load attention logs from directory."""
-        if self.log_dir is None:
-            raise ValueError("No log_dir specified")
+        """Load and merge attention logs from both directories."""
+        if self.feature_dir is None or self.attention_dir is None:
+            raise ValueError("Both feature_dir and attention_dir must be specified")
         
-        loader = AttentionLogLoader(self.log_dir)
+        loader = AttentionLogLoader(self.feature_dir, self.attention_dir)
         self._logs = loader.load(step_range)
         return self
     
@@ -795,10 +828,16 @@ def main():
         description='Head Specialization Analysis for XAI'
     )
     parser.add_argument(
-        '--log_dir', '-l',
+        '--feature_dir', '-f',
         type=str,
         required=True,
-        help='Directory containing attention log files'
+        help='Directory containing training logs (semantic features)'
+    )
+    parser.add_argument(
+        '--attention_dir', '-a',
+        type=str,
+        required=True,
+        help='Directory containing offline extractions (attention weights)'
     )
     parser.add_argument(
         '--output_dir', '-o',
@@ -842,12 +881,16 @@ def main():
     print(f"\n{'='*60}")
     print("HEAD SPECIALIZATION ANALYSIS")
     print(f"{'='*60}")
-    print(f"Log directory: {args.log_dir}")
+    print(f"Feature directory: {args.feature_dir}")
+    print(f"Attention directory: {args.attention_dir}")
     print(f"Output directory: {args.output_dir}")
     print(f"{'='*60}\n")
     
     # Load and analyze
-    analyzer = HeadSpecializationAnalyzer(log_dir=args.log_dir)
+    analyzer = HeadSpecializationAnalyzer(
+        feature_dir=args.feature_dir,
+        attention_dir=args.attention_dir
+    )
     analyzer.load_data(step_range=step_range)
     analyzer.compute_hsi()
     
