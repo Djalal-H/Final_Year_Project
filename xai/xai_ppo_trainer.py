@@ -25,60 +25,9 @@ from vmax.agents.pipeline import inference, pmap
 from vmax.scripts.training import train_utils
 from vmax.simulator import metrics as _metrics
 
-from waymax import dynamics
 
 from xai.attention_logger import AttentionLogger
 
-
-def _make_attention_extractor(env, network_config):
-    """Create a JIT-compiled function to extract attention weights.
-    
-    This function runs outside of pmap on a single device, allowing us to
-    extract attention weights without modifying the main training loop.
-    
-    Args:
-        env: The environment (used to get unflatten_fn).
-        network_config: Network configuration dict to rebuild the encoder.
-        
-    Returns:
-        A JIT-compiled function that takes (policy_params, obs) and returns attention_weights.
-    """
-    from vmax.agents.networks import network_factory, network_utils
-    
-    # Rebuild the encoder from config (same as in make_policy_network)
-    unflatten_fn = env.get_wrapper_attr("features_extractor").unflatten_features
-    _config = network_utils.convert_to_dict_with_activation_fn(network_config)
-    encoder = network_factory._build_encoder_layer(_config["encoder"], unflatten_fn)
-    
-    if encoder is None:
-        raise ValueError("Cannot extract attention from 'none' encoder type. Use an encoder like 'wayformer'.")
-    
-    @jax.jit
-    def extract_attention(policy_params, obs):
-        """Extract attention weights from encoder.
-        
-        Args:
-            policy_params: Policy network parameters (from training_state.params.policy).
-            obs: Observation tensor of shape (batch, obs_dim).
-            
-        Returns:
-            Dictionary of attention weight tensors.
-        """
-        # Unflatten observation to dict format expected by encoder
-        obs_dict = unflatten_fn(obs)
-        
-        # Call encoder with return_attention_weights=True
-        # The encoder params are nested under 'encoder_layer' in policy params
-        encoder_params = {'params': policy_params['params']['encoder_layer']}
-        
-        latent, attention_weights = encoder.apply(
-            encoder_params,
-            obs_dict,
-            return_attention_weights=True
-        )
-        return attention_weights
-    
-    return extract_attention
 
 
 if typing.TYPE_CHECKING:
@@ -197,32 +146,6 @@ def train(
     step_fn = partial(inference.policy_step, extra_fields=("truncation", "steps", "rewards"))
     print("-> Initializing networks... Done.")
     
-    # Create attention extractor for XAI (non-pmapped, runs on single device)
-    attention_extractor = None
-    extraction_env = None
-    if do_attention_logging:
-        attention_extractor = _make_attention_extractor(env, network_config)
-        
-        # Create a base environment for observation extraction (no VmapWrapper)
-        # Use same observation wrapper as training env
-        from vmax.simulator import make_env, wrappers
-        
-        # Get observation config from network config (which came from training config)
-        obs_type = network_config.get("observation_type", "vec")
-        obs_config = network_config.get("observation_config", {})
-        
-        extraction_env = make_env(
-            max_num_objects=64,  # Default, doesn't need to match exactly
-            dynamics_model=dynamics.InvertibleBicycleModel(normalize_actions=True),
-            observation_type=obs_type,
-            observation_config=obs_config,
-            reward_type="",  # No reward needed for extraction
-            reward_config={},
-        )
-        # Add only BraxWrapper (no VmapWrapper or AutoResetWrapper)
-        extraction_env = wrappers.BraxWrapper(extraction_env, ["offroad", "overlap"])
-        
-        print("-> Attention extractor created with base extraction environment.")
 
     unroll_fn = partial(
         inference.generate_unroll,
@@ -304,68 +227,32 @@ def train(
 
         epoch_log_time = perf_counter() - t
 
-        # Attention logging (XAI) - Online extraction
+        # Attention logging (XAI) - Semantic features only (offline extraction)
         # Log every N iterations (more reliable than step-based since steps don't align)
         t = perf_counter()
         log_interval_iters = max(1, attention_log_freq // env_step_per_training_step)
-        should_log = attention_logger and attention_extractor and iter > 0 and iter % log_interval_iters == 0
+        should_log = attention_logger and iter > 0 and iter % log_interval_iters == 0
         if should_log:
-            print(f"[XAI] Extracting attention weights at step {current_step} (iteration {iter})...")
+            print(f"[XAI] Logging semantic features at step {current_step} (iteration {iter})...")
             try:
-                # Get current params (un-pmap to single device)
-                single_params = pmap.unpmap(training_state.params)
-                
-                # Process samples one at a time (extraction_env expects unbatched scenarios)
-                all_attention_weights = []
-                
-                # Import Waymax operations for proper scenario extraction
-                from waymax.datatypes import operations
-                
-                for sample_idx in range(attention_n_samples):
-                    # Extract single scenario from batch using Waymax operations
-                    # batch_scenarios has shape (num_devices, num_envs, ...)
-                    # First, get device 0 scenarios: shape (num_envs, ...)
-                    device_0_scenarios = jax.tree_map(lambda x: x[0] if x.ndim > 0 else x, batch_scenarios)
-                    
-                    # Then use python slicing to extract single scenario
-                    # This guarantees we get a scalar SimulatorState (shape ())
-                    idx = sample_idx % device_0_scenarios.shape[0] if device_0_scenarios.shape else 0
-                    single_scenario = jax.tree_map(lambda x: x[idx] if x.ndim > 0 else x, device_0_scenarios)
-                    
-                    # Extract observation directly from scenario without a full environment reset
-                    rng, sample_key = jax.random.split(rng)
-                    print("Single Scenario shape: ", single_scenario.shape)
-                    print("Single Scenario : ", single_scenario)
-                
-                    obs = extraction_env.observe(single_scenario)
-                    
-                    # Extract attention weights (single device, JIT compiled)
-                    attn_weights = attention_extractor(single_params.policy, obs)
-                    all_attention_weights.append(attn_weights)
-                
-                # Stack attention weights from all samples
-                attention_weights_np = jax.tree_map(
-                    lambda *arrays: np.stack([np.array(jax.device_get(a)) for a in arrays]),
-                    *all_attention_weights
-                )
-                
-                # Get sample scenarios for logging
+                # Get sample scenarios for semantic feature extraction
                 sample_scenarios = jax.tree_map(
                     lambda x: x[0, :attention_n_samples] if x.ndim > 1 else x[:attention_n_samples], 
                     batch_scenarios
                 )
                 
+                # Log with empty attention weights (will be extracted offline)
                 attention_logger.log(
                     step=current_step,
-                    attention_weights=attention_weights_np,
+                    attention_weights={},  # Empty - offline extraction only
                     simulator_state=sample_scenarios,
                     n_samples=attention_n_samples
                 )
-                print(f"[XAI] Successfully logged attention weights for step {current_step}")
-                metrics["xai/attention_log_count"] = current_step // attention_log_freq
+                print(f"[XAI] Successfully logged semantic features for step {current_step}")
+                metrics["xai/semantic_log_count"] = current_step // attention_log_freq
                 
             except Exception as e:
-                print(f"[XAI] Warning: Attention logging failed at step {current_step}: {e}")
+                print(f"[XAI] Warning: Semantic logging failed at step {current_step}: {e}")
                 import traceback
                 traceback.print_exc()
 
