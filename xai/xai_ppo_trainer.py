@@ -177,7 +177,7 @@ def train(
     # XAI-specific parameters
     attention_log_freq: int = 1000,
     attention_log_dir: str = "",
-    attention_n_samples: int = 4,
+    attention_n_samples: int = 8,
 ) -> None:
     """Train a PPO agent with attention weight extraction for XAI.
 
