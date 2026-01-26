@@ -367,10 +367,33 @@ def train(
             print(f"[XAI] Extracting & logging attention at step {current_step} (iteration {iter})...")
             try:
                 # Get sample scenarios for attention extraction
-                # Select first device's scenarios and first n samples
-                sample_scenarios = jax.tree_util.tree_map(
-                    lambda x: x[0, :attention_n_samples] if x.ndim > 1 else x[:attention_n_samples], 
+                # batch_scenarios has shape (num_devices, batch_size, ...) or similar
+                # We need to flatten to get individual scenarios, then select first n_samples
+                
+                # First, take scenarios from first device
+                device_scenarios = jax.tree_util.tree_map(
+                    lambda x: x[0] if x.ndim > 0 else x,
                     batch_scenarios
+                )
+                
+                # Now flatten any remaining batch dimensions to get individual scenarios
+                # device_scenarios likely has shape (batch_size, num_minibatches, ...)
+                # We need to reshape to (batch_size * num_minibatches, ...)
+                def flatten_batch(x):
+                    if not hasattr(x, 'ndim') or x.ndim == 0:
+                        return x
+                    # Flatten first two dimensions if they exist
+                    if x.ndim >= 2:
+                        new_shape = (-1,) + x.shape[2:]
+                        return x.reshape(new_shape)
+                    return x
+                
+                flattened_scenarios = jax.tree_util.tree_map(flatten_batch, device_scenarios)
+                
+                # Now select first n_samples
+                sample_scenarios = jax.tree_util.tree_map(
+                    lambda x: x[:attention_n_samples] if (hasattr(x, 'ndim') and x.ndim > 0) else x,
+                    flattened_scenarios
                 )
                 
                 # Extract real attention weights online (processes scenarios sequentially)
