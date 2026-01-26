@@ -78,15 +78,29 @@ def extract_attention_online(
     # Process scenarios one at a time (env.observe doesn't support batching)
     all_attention_weights = []
     
+    print(f"[XAI DEBUG] Processing {n_samples} scenarios for attention extraction...")
+    
     for i in range(n_samples):
-        # Extract single scenario from batch
+        print(f"[XAI DEBUG] Processing scenario {i+1}/{n_samples}")
+        
+        # Extract single scenario from batch - use squeeze like offline notebook
+        # First select the i-th scenario, then squeeze to remove batch dims
         single_scenario = jax.tree_util.tree_map(
-            lambda x: x[i] if x.ndim > 0 else x,
+            lambda x: x[i].squeeze() if hasattr(x, 'squeeze') and x.ndim > 0 else x,
             scenarios
         )
         
+        # Debug: Check a sample field shape
+        if hasattr(single_scenario, 'roadgraph_points'):
+            print(f"[XAI DEBUG] roadgraph shape after extraction: {single_scenario.roadgraph_points.x.shape}")
+        
         # Get observation for single scenario
-        obs = env.observe(single_scenario)
+        try:
+            obs = env.observe(single_scenario)
+            print(f"[XAI DEBUG] Observation shape: {obs.shape}")
+        except Exception as e:
+            print(f"[XAI DEBUG] Error in env.observe for scenario {i}: {e}")
+            raise
         
         # Add batch dimension for encoder
         if obs.ndim == 1:
@@ -95,6 +109,7 @@ def extract_attention_online(
         # Run forward pass with attention extraction
         _, attention_weights = encoder.apply({'params': encoder_params}, obs)
         all_attention_weights.append(attention_weights)
+        print(f"[XAI DEBUG] Extracted attention with keys: {list(attention_weights.keys())}")
     
     # Stack attention weights across samples
     # Each key will have shape (n_samples, ...) after stacking
