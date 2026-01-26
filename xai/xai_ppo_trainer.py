@@ -80,12 +80,18 @@ def extract_attention_online(
     
     print(f"[XAI DEBUG] Processing {n_samples} scenarios for attention extraction...")
     
-    # Debug: Check input scenario shapes
+    # Debug: Check input scenario shapes and structure
+    print(f"[XAI DEBUG] Scenario type: {type(scenarios)}")
     if hasattr(scenarios, 'roadgraph_points'):
-        print(f"[XAI DEBUG] Input scenarios roadgraph shape: {scenarios.roadgraph_points.x.shape}")
+        print(f"[XAI DEBUG] Input scenarios roadgraph.x shape: {scenarios.roadgraph_points.x.shape}")
+    if hasattr(scenarios, 'timestep'):
+        print(f"[XAI DEBUG] Input scenarios timestep shape: {scenarios.timestep.shape}")
+    if hasattr(scenarios, 'sim_trajectory'):
+        print(f"[XAI DEBUG] Input scenarios sim_trajectory.x shape: {scenarios.sim_trajectory.x.shape}")
+        print(f"[XAI DEBUG] Input scenarios sim_trajectory.yaw shape: {scenarios.sim_trajectory.yaw.shape}")
     
     for i in range(n_samples):
-        print(f"[XAI DEBUG] Processing scenario {i+1}/{n_samples}")
+        print(f"\n[XAI DEBUG] ===== Processing scenario {i+1}/{n_samples} =====")
         
         # Extract single scenario from batch
         # The offline notebook uses squeeze(0) on a batch-1 scenario
@@ -95,9 +101,18 @@ def extract_attention_online(
             scenarios
         )
         
-        # Debug: Check shape after indexing but before squeeze
+        # Debug: Check shape after indexing
+        print(f"[XAI DEBUG] After indexing [i]:")
         if hasattr(single_scenario, 'roadgraph_points'):
-            print(f"[XAI DEBUG] After indexing [i], roadgraph shape: {single_scenario.roadgraph_points.x.shape}")
+            print(f"[XAI DEBUG]   roadgraph.x shape: {single_scenario.roadgraph_points.x.shape}")
+        if hasattr(single_scenario, 'timestep'):
+            print(f"[XAI DEBUG]   timestep shape/value: {single_scenario.timestep.shape if hasattr(single_scenario.timestep, 'shape') else single_scenario.timestep}")
+        if hasattr(single_scenario, 'sim_trajectory'):
+            print(f"[XAI DEBUG]   sim_trajectory.x shape: {single_scenario.sim_trajectory.x.shape}")
+            print(f"[XAI DEBUG]   sim_trajectory.yaw shape: {single_scenario.sim_trajectory.yaw.shape}")
+        if hasattr(single_scenario, 'object_metadata'):
+            if hasattr(single_scenario.object_metadata, 'is_sdc'):
+                print(f"[XAI DEBUG]   is_sdc shape: {single_scenario.object_metadata.is_sdc.shape}")
         
         # Now apply squeeze to remove any remaining singleton dimensions
         single_scenario = jax.tree_util.tree_map(
@@ -106,15 +121,20 @@ def extract_attention_online(
         )
         
         # Debug: Check final shape after squeeze
+        print(f"[XAI DEBUG] After squeeze:")
         if hasattr(single_scenario, 'roadgraph_points'):
-            print(f"[XAI DEBUG] After squeeze, roadgraph shape: {single_scenario.roadgraph_points.x.shape}")
+            print(f"[XAI DEBUG]   roadgraph.x shape: {single_scenario.roadgraph_points.x.shape}")
+        if hasattr(single_scenario, 'sim_trajectory'):
+            print(f"[XAI DEBUG]   sim_trajectory.yaw shape: {single_scenario.sim_trajectory.yaw.shape}")
         
         # Get observation for single scenario
         try:
             obs = env.observe(single_scenario)
-            print(f"[XAI DEBUG] Observation shape: {obs.shape}")
+            print(f"[XAI DEBUG] ✓ Observation shape: {obs.shape}")
         except Exception as e:
-            print(f"[XAI DEBUG] Error in env.observe for scenario {i}: {e}")
+            print(f"[XAI DEBUG] ✗ Error in env.observe for scenario {i}: {e}")
+            import traceback
+            traceback.print_exc()
             raise
         
         # Add batch dimension for encoder
@@ -124,7 +144,7 @@ def extract_attention_online(
         # Run forward pass with attention extraction
         _, attention_weights = encoder.apply({'params': encoder_params}, obs)
         all_attention_weights.append(attention_weights)
-        print(f"[XAI DEBUG] Extracted attention with keys: {list(attention_weights.keys())}")
+        print(f"[XAI DEBUG] ✓ Extracted attention with {len(attention_weights)} keys")
     
     # Stack attention weights across samples
     # Each key will have shape (n_samples, ...) after stacking
@@ -177,7 +197,7 @@ def train(
     # XAI-specific parameters
     attention_log_freq: int = 1000,
     attention_log_dir: str = "",
-    attention_n_samples: int = 8,
+    attention_n_samples: int = 4,
 ) -> None:
     """Train a PPO agent with attention weight extraction for XAI.
 
