@@ -28,6 +28,7 @@ from vmax.simulator import metrics as _metrics
 
 
 from xai.attention_logger import AttentionLogger
+from xai.local_encoder import LocalWayformerEncoder
 
 
 def extract_attention_online(
@@ -62,8 +63,9 @@ def extract_attention_online(
     encoder_cfg = network_utils.parse_config(encoder_cfg, "encoder")
     encoder_cfg = network_utils.convert_to_dict_with_activation_fn(encoder_cfg)
     
-    # Build encoder with return_attention_weights=True
-    encoder = encoders.WayformerEncoder(
+    # Build LOCAL encoder with return_attention_weights=True
+    # This encoder handles roadgraph shapes correctly (no extra batch dimension)
+    encoder = LocalWayformerEncoder(
         unflatten_fn,
         return_attention_weights=True,
         **encoder_cfg
