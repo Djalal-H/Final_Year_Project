@@ -344,11 +344,8 @@ def train(
                 sample_scenarios_list = []
                 for i in range(attention_n_samples):
                     scenario_batch = next(data_generator)
-                    # Data generator produces batches - take first scenario from batch
-                    scenario = jax.tree_util.tree_map(
-                        lambda x: x[0] if (hasattr(x, 'ndim') and x.ndim > 0) else x,
-                        scenario_batch
-                    )
+                    # Squeeze batch dim (offline notebook uses squeeze(0), not indexing)
+                    scenario = jax.tree_util.tree_map(lambda x: x.squeeze(0), scenario_batch)
                     sample_scenarios_list.append(scenario)
                 
                 # Extract real attention weights online (processes scenarios sequentially)
