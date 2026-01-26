@@ -34,7 +34,7 @@ def extract_attention_online(
     env,
     params,
     network_config: dict,
-    scenarios,
+    scenarios_list: list,
     n_samples: int = 4,
 ) -> dict:
     """Extract attention weights from encoder during training.
@@ -47,7 +47,7 @@ def extract_attention_online(
         env: The environment (used for observe and unflatten_fn).
         params: Current training parameters (PPONetworkParams).
         network_config: Network configuration dictionary.
-        scenarios: Batched scenarios from training (will process first n_samples).
+        scenarios_list: List of individual scenarios (already squeezed).
         n_samples: Number of samples to extract attention for.
         
     Returns:
@@ -78,63 +78,14 @@ def extract_attention_online(
     # Process scenarios one at a time (env.observe doesn't support batching)
     all_attention_weights = []
     
-    print(f"[XAI DEBUG] Processing {n_samples} scenarios for attention extraction...")
+    print(f"[XAI DEBUG] Processing {len(scenarios_list)} scenarios for attention extraction...")
     
-    # Debug: Check input scenario shapes and structure
-    print(f"[XAI DEBUG] Scenario type: {type(scenarios)}")
-    if hasattr(scenarios, 'roadgraph_points'):
-        print(f"[XAI DEBUG] Input scenarios roadgraph.x shape: {scenarios.roadgraph_points.x.shape}")
-    if hasattr(scenarios, 'timestep'):
-        print(f"[XAI DEBUG] Input scenarios timestep shape: {scenarios.timestep.shape}")
-    if hasattr(scenarios, 'sim_trajectory'):
-        print(f"[XAI DEBUG] Input scenarios sim_trajectory.x shape: {scenarios.sim_trajectory.x.shape}")
-        print(f"[XAI DEBUG] Input scenarios sim_trajectory.yaw shape: {scenarios.sim_trajectory.yaw.shape}")
-    
-    for i in range(n_samples):
-        print(f"\n[XAI DEBUG] ===== Processing scenario {i+1}/{n_samples} =====")
+    for i, single_scenario in enumerate(scenarios_list):
+        print(f"\n[XAI DEBUG] ===== Processing scenario {i+1}/{len(scenarios_list)} =====")
         
-        # Extract single scenario from batch
-        # The offline notebook uses squeeze(0) on a batch-1 scenario
-        # We need to select index i and ensure all dimensions are properly reduced
-        single_scenario = jax.tree_util.tree_map(
-            lambda x: x[i] if (hasattr(x, 'ndim') and x.ndim > 0) else x,
-            scenarios
-        )
-        
-        # Debug: Check shape after indexing
-        print(f"[XAI DEBUG] After indexing [i]:")
+        # Debug: Check scenario structure
         if hasattr(single_scenario, 'roadgraph_points'):
             print(f"[XAI DEBUG]   roadgraph.x shape: {single_scenario.roadgraph_points.x.shape}")
-        if hasattr(single_scenario, 'timestep'):
-            ts = single_scenario.timestep
-            ts_shape = ts.shape if hasattr(ts, 'shape') else 'scalar'
-            ts_value = int(ts) if hasattr(ts, 'item') else ts
-            print(f"[XAI DEBUG]   timestep shape: {ts_shape}, value: {ts_value}")
-        if hasattr(single_scenario, 'sim_trajectory'):
-            print(f"[XAI DEBUG]   sim_trajectory.x shape: {single_scenario.sim_trajectory.x.shape}")
-            print(f"[XAI DEBUG]   sim_trajectory.yaw shape: {single_scenario.sim_trajectory.yaw.shape}")
-        if hasattr(single_scenario, 'object_metadata'):
-            if hasattr(single_scenario.object_metadata, 'is_sdc'):
-                print(f"[XAI DEBUG]   is_sdc shape: {single_scenario.object_metadata.is_sdc.shape}")
-        
-        # Now apply squeeze to remove any remaining singleton dimensions
-        # BUT preserve timestep as integer if it's a scalar
-        def smart_squeeze(x):
-            if not hasattr(x, 'squeeze'):
-                return x
-            # Don't squeeze scalars (0-d arrays)
-            if hasattr(x, 'ndim') and x.ndim == 0:
-                return x
-            return x.squeeze()
-        
-        single_scenario = jax.tree_util.tree_map(smart_squeeze, single_scenario)
-        
-        # Debug: Check final shape after squeeze
-        print(f"[XAI DEBUG] After squeeze:")
-        if hasattr(single_scenario, 'roadgraph_points'):
-            print(f"[XAI DEBUG]   roadgraph.x shape: {single_scenario.roadgraph_points.x.shape}")
-        if hasattr(single_scenario, 'sim_trajectory'):
-            print(f"[XAI DEBUG]   sim_trajectory.yaw shape: {single_scenario.sim_trajectory.yaw.shape}")
         if hasattr(single_scenario, 'timestep'):
             ts = single_scenario.timestep
             ts_shape = ts.shape if hasattr(ts, 'shape') else 'scalar'
@@ -380,35 +331,17 @@ def train(
         if should_log:
             print(f"[XAI] Extracting & logging attention at step {current_step} (iteration {iter})...")
             try:
-                # Get sample scenarios for attention extraction
-                # batch_scenarios has shape (num_devices, batch_size, ...) or similar
-                # We need to flatten to get individual scenarios, then select first n_samples
-                
-                # First, take scenarios from first device
-                device_scenarios = jax.tree_util.tree_map(
-                    lambda x: x[0] if x.ndim > 0 else x,
-                    batch_scenarios
-                )
-                
-                # Now flatten any remaining batch dimensions to get individual scenarios
-                # device_scenarios likely has shape (batch_size, num_minibatches, ...)
-                # We need to reshape to (batch_size * num_minibatches, ...)
-                def flatten_batch(x):
-                    if not hasattr(x, 'ndim') or x.ndim == 0:
-                        return x
-                    # Flatten first two dimensions if they exist
-                    if x.ndim >= 2:
-                        new_shape = (-1,) + x.shape[2:]
-                        return x.reshape(new_shape)
-                    return x
-                
-                flattened_scenarios = jax.tree_util.tree_map(flatten_batch, device_scenarios)
-                
-                # Now select first n_samples
-                sample_scenarios = jax.tree_util.tree_map(
-                    lambda x: x[:attention_n_samples] if (hasattr(x, 'ndim') and x.ndim > 0) else x,
-                    flattened_scenarios
-                )
+                # Sample fresh scenarios from data generator (like offline notebook does)
+                # This avoids the complex scenario structure from training batches
+                sample_scenarios_list = []
+                for i in range(attention_n_samples):
+                    scenario = next(data_generator)
+                    # Squeeze batch dimension (data_generator has batch_dims)
+                    scenario = jax.tree_util.tree_map(
+                        lambda x: x.squeeze(0) if (hasattr(x, 'squeeze') and hasattr(x, 'ndim') and x.ndim > 0) else x,
+                        scenario
+                    )
+                    sample_scenarios_list.append(scenario)
                 
                 # Extract real attention weights online (processes scenarios sequentially)
                 current_params = pmap.unpmap(training_state.params)
@@ -416,7 +349,7 @@ def train(
                     env, 
                     current_params, 
                     network_config, 
-                    sample_scenarios,
+                    sample_scenarios_list,
                     n_samples=attention_n_samples
                 )
                 # Convert to numpy for logging
@@ -426,10 +359,11 @@ def train(
                 )
                 
                 # Log attention weights with semantic features
+                # Use first scenario for semantic features (they're all from same distribution)
                 attention_logger.log(
                     step=current_step,
                     attention_weights=attention_weights,
-                    simulator_state=sample_scenarios,
+                    simulator_state=sample_scenarios_list[0] if sample_scenarios_list else None,
                     n_samples=attention_n_samples
                 )
                 print(f"[XAI] Successfully logged attention for step {current_step}")
