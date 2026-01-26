@@ -80,19 +80,34 @@ def extract_attention_online(
     
     print(f"[XAI DEBUG] Processing {n_samples} scenarios for attention extraction...")
     
+    # Debug: Check input scenario shapes
+    if hasattr(scenarios, 'roadgraph_points'):
+        print(f"[XAI DEBUG] Input scenarios roadgraph shape: {scenarios.roadgraph_points.x.shape}")
+    
     for i in range(n_samples):
         print(f"[XAI DEBUG] Processing scenario {i+1}/{n_samples}")
         
-        # Extract single scenario from batch - use squeeze like offline notebook
-        # First select the i-th scenario, then squeeze to remove batch dims
+        # Extract single scenario from batch
+        # The offline notebook uses squeeze(0) on a batch-1 scenario
+        # We need to select index i and ensure all dimensions are properly reduced
         single_scenario = jax.tree_util.tree_map(
-            lambda x: x[i].squeeze() if hasattr(x, 'squeeze') and x.ndim > 0 else x,
+            lambda x: x[i] if (hasattr(x, 'ndim') and x.ndim > 0) else x,
             scenarios
         )
         
-        # Debug: Check a sample field shape
+        # Debug: Check shape after indexing but before squeeze
         if hasattr(single_scenario, 'roadgraph_points'):
-            print(f"[XAI DEBUG] roadgraph shape after extraction: {single_scenario.roadgraph_points.x.shape}")
+            print(f"[XAI DEBUG] After indexing [i], roadgraph shape: {single_scenario.roadgraph_points.x.shape}")
+        
+        # Now apply squeeze to remove any remaining singleton dimensions
+        single_scenario = jax.tree_util.tree_map(
+            lambda x: x.squeeze() if hasattr(x, 'squeeze') else x,
+            single_scenario
+        )
+        
+        # Debug: Check final shape after squeeze
+        if hasattr(single_scenario, 'roadgraph_points'):
+            print(f"[XAI DEBUG] After squeeze, roadgraph shape: {single_scenario.roadgraph_points.x.shape}")
         
         # Get observation for single scenario
         try:
