@@ -34,22 +34,25 @@ def extract_attention_online(
     env,
     params,
     network_config: dict,
-    observations: jax.Array,
+    scenarios,
+    n_samples: int = 4,
 ) -> dict:
     """Extract attention weights from encoder during training.
     
-    Uses the trained encoder parameters to compute attention weights
-    for the given observations. This enables online (real-time) attention
-    analysis during training.
+    Processes scenarios sequentially (one at a time) since env.observe()
+    doesn't support batched scenarios. This mirrors the approach in
+    offline_attention_extraction.ipynb.
     
     Args:
-        env: The environment (used to get unflatten_fn).
+        env: The environment (used for observe and unflatten_fn).
         params: Current training parameters (PPONetworkParams).
         network_config: Network configuration dictionary.
-        observations: Flattened observation tensor.
+        scenarios: Batched scenarios from training (will process first n_samples).
+        n_samples: Number of samples to extract attention for.
         
     Returns:
         Dictionary of attention weights from WayformerEncoder.
+        Each value is stacked across all samples.
     """
     # Get unflatten function from environment
     unflatten_fn = env.get_wrapper_attr("features_extractor").unflatten_features
@@ -72,14 +75,39 @@ def extract_attention_online(
     else:
         raise ValueError("Could not find 'encoder_layer' in policy params")
     
-    # Add batch dimension if needed
-    if observations.ndim == 1:
-        observations = jnp.expand_dims(observations, axis=0)
+    # Process scenarios one at a time (env.observe doesn't support batching)
+    all_attention_weights = []
     
-    # Run forward pass with attention extraction
-    _, attention_weights = encoder.apply({'params': encoder_params}, observations)
+    for i in range(n_samples):
+        # Extract single scenario from batch
+        single_scenario = jax.tree_util.tree_map(
+            lambda x: x[i] if x.ndim > 0 else x,
+            scenarios
+        )
+        
+        # Get observation for single scenario
+        obs = env.observe(single_scenario)
+        
+        # Add batch dimension for encoder
+        if obs.ndim == 1:
+            obs = jnp.expand_dims(obs, axis=0)
+        
+        # Run forward pass with attention extraction
+        _, attention_weights = encoder.apply({'params': encoder_params}, obs)
+        all_attention_weights.append(attention_weights)
     
-    return attention_weights
+    # Stack attention weights across samples
+    # Each key will have shape (n_samples, ...) after stacking
+    stacked_weights = {}
+    if all_attention_weights:
+        keys = all_attention_weights[0].keys()
+        for key in keys:
+            stacked_weights[key] = jnp.concatenate(
+                [aw[key] for aw in all_attention_weights],
+                axis=0
+            )
+    
+    return stacked_weights
 
 
 
@@ -289,18 +317,20 @@ def train(
             print(f"[XAI] Extracting & logging attention at step {current_step} (iteration {iter})...")
             try:
                 # Get sample scenarios for attention extraction
-                sample_scenarios = jax.tree_map(
+                # Select first device's scenarios and first n samples
+                sample_scenarios = jax.tree_util.tree_map(
                     lambda x: x[0, :attention_n_samples] if x.ndim > 1 else x[:attention_n_samples], 
                     batch_scenarios
                 )
                 
-                # Get observations from sample scenarios
-                sample_obs = env.observe(sample_scenarios)
-                
-                # Extract real attention weights online
+                # Extract real attention weights online (processes scenarios sequentially)
                 current_params = pmap.unpmap(training_state.params)
                 attention_weights = extract_attention_online(
-                    env, current_params, network_config, sample_obs
+                    env, 
+                    current_params, 
+                    network_config, 
+                    sample_scenarios,
+                    n_samples=attention_n_samples
                 )
                 # Convert to numpy for logging
                 attention_weights = jax.tree_util.tree_map(
