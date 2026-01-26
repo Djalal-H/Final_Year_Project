@@ -89,7 +89,13 @@ def extract_attention_online(
         if hasattr(single_scenario, 'timestep'):
             ts = single_scenario.timestep
             ts_shape = ts.shape if hasattr(ts, 'shape') else 'scalar'
-            ts_value = int(ts) if hasattr(ts, 'item') else ts
+            # Only convert to int if it's a scalar (0-d array)
+            if hasattr(ts, 'ndim') and ts.ndim == 0:
+                ts_value = int(ts.item())
+            elif hasattr(ts, 'shape'):
+                ts_value = f"array{ts.shape}"
+            else:
+                ts_value = ts
             print(f"[XAI DEBUG]   timestep shape: {ts_shape}, value: {ts_value}")
         
         # Get observation for single scenario
@@ -335,11 +341,11 @@ def train(
                 # This avoids the complex scenario structure from training batches
                 sample_scenarios_list = []
                 for i in range(attention_n_samples):
-                    scenario = next(data_generator)
-                    # Squeeze batch dimension (data_generator has batch_dims)
+                    scenario_batch = next(data_generator)
+                    # Data generator produces batches - take first scenario from batch
                     scenario = jax.tree_util.tree_map(
-                        lambda x: x.squeeze(0) if (hasattr(x, 'squeeze') and hasattr(x, 'ndim') and x.ndim > 0) else x,
-                        scenario
+                        lambda x: x[0] if (hasattr(x, 'ndim') and x.ndim > 0) else x,
+                        scenario_batch
                     )
                     sample_scenarios_list.append(scenario)
                 
