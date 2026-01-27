@@ -547,32 +547,24 @@ class OfflineExtractor:
             if i >= n_scenarios:
                 break
             
-            # Squeeze batch dimension
-            scenario = jax.tree_util.tree_map(lambda x: x.squeeze(0), scenario_batch)
+            # DON'T squeeze - keep the batch dimension (1,)
+            # The env.observe expects batched input
+            scenario = scenario_batch
             
-            # Debug: check scenario state
-            print(f"\n[DEBUG] Scenario {i} raw from data_gen:")
-            print(f"[DEBUG] scenario.timestep: {scenario.timestep}")
-            print(f"[DEBUG] scenario.sim_trajectory.valid shape: {scenario.sim_trajectory.valid.shape}")
-            valid_at_t0 = np.array(jax.device_get(scenario.sim_trajectory.valid[:, 0]))
-            print(f"[DEBUG] Valid objects at timestep 0: {valid_at_t0.sum()} / {valid_at_t0.size}")
-            
-            # The scenario from data_gen is at timestep 0, we need to reset the env
-            # to properly initialize it
-            reset_state = self.env.reset(scenario)
-            print(f"[DEBUG] After env.reset:")
-            print(f"[DEBUG] reset_state.timestep: {reset_state.timestep}")
-            valid_after_reset = np.array(jax.device_get(reset_state.sim_trajectory.valid[:, reset_state.timestep]))
-            print(f"[DEBUG] Valid objects after reset: {valid_after_reset.sum()} / {valid_after_reset.size}")
-            
-            print(f"  Scenario {i+1}/{n_scenarios}", end="")
+            print(f"\n  Scenario {i+1}/{n_scenarios}", end="")
             
             try:
-                result = self.extract_scenario(scenario, scenario_id=i)
+                # Reset env to properly initialize the state
+                reset_state = self.env.reset(scenario)
+                
+                # Use reset_state for extraction (not raw scenario)
+                result = self.extract_scenario(reset_state, scenario_id=i)
                 results.append(result)
                 print(" ✓")
             except Exception as e:
                 print(f" ✗ Error: {e}")
+                import traceback
+                traceback.print_exc()
         
         # Save results
         os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
