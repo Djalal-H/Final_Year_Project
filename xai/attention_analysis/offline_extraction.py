@@ -209,9 +209,13 @@ class OfflineExtractor:
         if isinstance(obs, tuple):
             raise ValueError("Observation is a tuple, expected flattened array")
         
+        # Add batch dimension if missing (required by WayformerEncoder)
+        if obs.ndim == 1:
+            obs = jnp.expand_dims(obs, axis=0)  # (obs_dim,) -> (1, obs_dim)
+        
         if debug:
             obs_np = np.array(jax.device_get(obs))
-            print(f"\n[DEBUG] Observation shape: {obs_np.shape}")
+            print(f"\n[DEBUG] Observation shape (with batch): {obs_np.shape}")
             print(f"[DEBUG] Obs min: {obs_np.min():.4f}, max: {obs_np.max():.4f}, mean: {obs_np.mean():.4f}")
             print(f"[DEBUG] Obs std: {obs_np.std():.4f}")
             print(f"[DEBUG] Non-zero elements: {np.count_nonzero(obs_np)} / {obs_np.size}")
