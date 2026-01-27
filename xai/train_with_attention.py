@@ -1,17 +1,16 @@
 # Copyright 2025 Valeo.
 
 
-"""Script to run training with attention weight logging for XAI analysis.
+"""Script to run PPO training for XAI analysis.
 
-This script is similar to vmax/scripts/training/train.py but uses the XAI-enabled
-PPO trainer that periodically logs attention weights for Head Specialization Analysis.
+This script trains a PPO agent and saves checkpoints that can be used for
+offline attention analysis and Head Specialization Analysis.
 
 Usage:
-    python xai/train_with_attention.py algorithm=PPO \\
-        +xai.attention_log_freq=1000 \\
-        +xai.attention_n_samples=4
+    python xai/train_with_attention.py algorithm=PPO save_freq=20
 
-The attention logs will be saved in the run directory under 'attention_logs/'.
+Checkpoints will be saved regularly and can be analyzed offline using
+the scripts in xai/attention_analysis/.
 """
 
 import os
@@ -25,8 +24,8 @@ from waymax import dynamics
 from vmax import PATH_TO_APP, simulator
 from vmax.scripts.training import train_utils
 
-# Import XAI PPO trainer instead of standard one
-from xai.xai_ppo_trainer import train as xai_train
+# Import PPO trainer (clean version without online logging)
+from xai.xai_ppo_trainer import train as ppo_train
 
 
 OmegaConf.register_new_resolver("output_dir", train_utils.resolve_output_dir)
@@ -46,11 +45,10 @@ def run(cfg: DictConfig) -> None:
     train_utils.print_hyperparameters(config)
     train_utils.get_and_print_device_info()
 
-    # Print XAI-specific info
-    xai_config = config.get("xai", {})
-    print(" XAI Configuration ".center(40, "="))
-    print(f"- Attention Log Freq : {xai_config.get('attention_log_freq', 1000)}")
-    print(f"- Attention N Samples: {xai_config.get('attention_n_samples', 4)}")
+    # Print training info
+    print(" Training Configuration ".center(40, "="))
+    print(f"- Save Frequency: {config.get('save_freq', 200)} iterations")
+    print(f"- Checkpoints for offline XAI analysis enabled")
 
     env_config, run_config = train_utils.build_config_dicts(config)
 
@@ -98,16 +96,11 @@ def run(cfg: DictConfig) -> None:
     writer = train_utils.setup_tensorboard(relative_run_path)
     progress = partial(train_utils.log_metrics, writer=writer)
 
-    # XAI-specific configuration
-    attention_log_dir = absolute_run_path  # Attention logs go in run directory
-    attention_log_freq = xai_config.get("attention_log_freq", 1000)
-    attention_n_samples = xai_config.get("attention_n_samples", 4)
-
-    ## TRAINING WITH ATTENTION LOGGING
-    # Ensure we're using PPO (only algorithm supported for attention logging)
+    ## TRAINING (Checkpoints saved for offline XAI analysis)
+    # Ensure we're using PPO
     if config["algorithm"]["name"] != "PPO":
-        print(f"[WARNING] XAI training only supports PPO, got {config['algorithm']['name']}")
-        print("[WARNING] Falling back to standard training without attention logging")
+        print(f"[WARNING] This script is designed for PPO, got {config['algorithm']['name']}")
+        print("[WARNING] Falling back to standard training")
         from vmax.agents import learning
         train_fn = learning.get_train_fn(config["algorithm"]["name"])
         train_fn(
@@ -120,8 +113,8 @@ def run(cfg: DictConfig) -> None:
             disable_tqdm=not sys.stdout.isatty(),
         )
     else:
-        # Use XAI-enabled PPO trainer
-        xai_train(
+        # Use PPO trainer (checkpoints will be saved at save_freq intervals)
+        ppo_train(
             env=env,
             data_generator=data_generator,
             eval_scenario=eval_scenario,
@@ -129,10 +122,6 @@ def run(cfg: DictConfig) -> None:
             progress_fn=progress,
             checkpoint_logdir=model_path,
             disable_tqdm=not sys.stdout.isatty(),
-            # XAI-specific parameters
-            attention_log_freq=attention_log_freq,
-            attention_log_dir=attention_log_dir,
-            attention_n_samples=attention_n_samples,
         )
 
 
