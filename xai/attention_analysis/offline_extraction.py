@@ -192,11 +192,12 @@ class OfflineExtractor:
         
         return boundaries
     
-    def extract_attention(self, scenario) -> Dict[str, np.ndarray]:
+    def extract_attention(self, scenario, debug: bool = True) -> Dict[str, np.ndarray]:
         """Extract attention weights from a scenario.
         
         Args:
             scenario: Simulator state (single scenario, no batch dim).
+            debug: If True, print debug information.
             
         Returns:
             Dictionary of attention weight arrays.
@@ -205,6 +206,16 @@ class OfflineExtractor:
         obs = self.env.observe(scenario)
         if isinstance(obs, tuple):
             raise ValueError("Observation is a tuple, expected flattened array")
+        
+        if debug:
+            obs_np = np.array(jax.device_get(obs))
+            print(f"\n[DEBUG] Observation shape: {obs_np.shape}")
+            print(f"[DEBUG] Obs min: {obs_np.min():.4f}, max: {obs_np.max():.4f}, mean: {obs_np.mean():.4f}")
+            print(f"[DEBUG] Obs std: {obs_np.std():.4f}")
+            print(f"[DEBUG] Non-zero elements: {np.count_nonzero(obs_np)} / {obs_np.size}")
+            
+            # Check encoder params structure
+            print(f"\n[DEBUG] Encoder params keys: {list(self.encoder_params.keys())[:10]}...")
         
         # Forward pass with attention extraction
         @jax.jit
@@ -222,6 +233,9 @@ class OfflineExtractor:
             lambda x: np.array(jax.device_get(x)),
             attn_weights
         )
+        
+        if debug:
+            print(f"[DEBUG] Attention weight keys: {list(attn_weights.keys())}")
         
         return attn_weights
     
