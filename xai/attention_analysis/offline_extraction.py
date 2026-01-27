@@ -520,6 +520,73 @@ class OfflineExtractor:
             }
         }
     
+    def extract_scenario_with_obs(self, state, obs, scenario_id: int = 0, debug: bool = True) -> Dict[str, Any]:
+        """Extract all data using pre-computed observation.
+        
+        This method is used when the observation has already been computed (e.g., from env.reset).
+        
+        Args:
+            state: Simulator state (squeezed, no batch dim).
+            obs: Pre-computed observation array.
+            scenario_id: ID for this scenario.
+            debug: If True, print debug information.
+            
+        Returns:
+            Dictionary with all extracted data.
+        """
+        # Check observation
+        if debug:
+            obs_np = np.array(jax.device_get(obs))
+            print(f"\n[DEBUG] Pre-computed observation shape: {obs_np.shape}")
+            print(f"[DEBUG] Obs min: {obs_np.min():.4f}, max: {obs_np.max():.4f}, mean: {obs_np.mean():.4f}")
+            print(f"[DEBUG] Obs std: {obs_np.std():.4f}")
+            
+            # Check unflatten produces valid masks now
+            unflatten_fn = self.env.get_wrapper_attr("features_extractor").unflatten_features
+            features, masks = unflatten_fn(obs)
+            mask_arr = np.array(masks[1])
+            print(f"[DEBUG] other_traj_valid_mask True count: {mask_arr.sum()} / {mask_arr.size}")
+        
+        # Forward pass with attention extraction
+        @jax.jit
+        def forward_with_attention(e_params, observation):
+            latent, attention_weights = self.encoder.apply(
+                {'params': e_params},
+                observation
+            )
+            return latent, attention_weights
+        
+        _, attn_weights = forward_with_attention(self.encoder_params, obs)
+        
+        # Convert to numpy
+        attn_weights = jax.tree_util.tree_map(
+            lambda x: np.array(jax.device_get(x)),
+            attn_weights
+        )
+        
+        if debug:
+            print(f"[DEBUG] Attention weight keys: {list(attn_weights.keys())}")
+        
+        # Aggregate per-vehicle attention
+        attention_per_vehicle = self.aggregate_vehicle_attention(attn_weights)
+        
+        # Extract semantic features from state
+        semantic_features = self.extract_semantic_features(state)
+        
+        return {
+            'scenario_id': scenario_id,
+            'attention_weights': attn_weights,
+            'attention_per_vehicle': attention_per_vehicle,
+            'semantic_features': semantic_features,
+            'token_boundaries': self.token_boundaries,
+            'metadata': {
+                'n_vehicles': self._n_vehicles,
+                'n_timesteps': self._n_timesteps,
+                'n_roadgraph': self._n_roadgraph,
+                'n_traffic_lights': self._n_traffic_lights,
+            }
+        }
+    
     def run(self, n_scenarios: int, output_path: str) -> List[Dict[str, Any]]:
         """Run extraction on multiple scenarios.
         
@@ -547,8 +614,7 @@ class OfflineExtractor:
             if i >= n_scenarios:
                 break
             
-            # DON'T squeeze - keep the batch dimension (1,)
-            # The env.observe expects batched input
+            # Keep the batch dimension for env.reset (it uses vmap)
             scenario = scenario_batch
             
             print(f"\n  Scenario {i+1}/{n_scenarios}", end="")
@@ -557,11 +623,18 @@ class OfflineExtractor:
                 # Reset env to properly initialize the state
                 env_transition = self.env.reset(scenario)
                 
-                # Extract the SimulatorState from the EnvTransition
-                reset_state = env_transition.state
+                # Use observation from EnvTransition (already computed during reset)
+                # This avoids the shape issues with calling env.observe again
+                obs = env_transition.observation
                 
-                # Use reset_state for extraction (not raw scenario)
-                result = self.extract_scenario(reset_state, scenario_id=i)
+                # Squeeze state for semantic feature extraction
+                reset_state = jax.tree_util.tree_map(
+                    lambda x: x.squeeze(0) if hasattr(x, 'squeeze') and x.ndim > 0 else x,
+                    env_transition.state
+                )
+                
+                # Use pre-computed observation and squeezed state for extraction
+                result = self.extract_scenario_with_obs(reset_state, obs, scenario_id=i)
                 results.append(result)
                 print(" ✓")
             except Exception as e:
