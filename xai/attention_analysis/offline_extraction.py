@@ -37,8 +37,8 @@ from vmax.agents.learning.reinforcement.ppo import ppo_factory
 from vmax.agents.networks import network_utils
 from vmax.scripts.evaluate.utils import load_params, load_yaml_config
 
-# Import local encoder for attention extraction
-from xai.local_encoder import LocalWayformerEncoder
+# Import the ORIGINAL WayformerEncoder (it supports return_attention_weights=True)
+from vmax.agents.networks.encoders.wayformer import WayformerEncoder
 
 
 class OfflineExtractor:
@@ -113,8 +113,10 @@ class OfflineExtractor:
         encoder_cfg = network_utils.parse_config(self.config["encoder"], "encoder")
         encoder_cfg = network_utils.convert_to_dict_with_activation_fn(encoder_cfg)
         
-        self.encoder = LocalWayformerEncoder(
-            unflatten_fn,
+        # Use the ORIGINAL WayformerEncoder - it has return_attention_weights support
+        # and matches the trained model's layer structure
+        self.encoder = WayformerEncoder(
+            unflatten_fn=unflatten_fn,
             return_attention_weights=True,
             **encoder_cfg
         )
