@@ -155,7 +155,17 @@ class OfflineExtractor:
                 print(f"[DEBUG] encoder_layer keys: {list(enc_params.keys())}")
                 # Show nested structure of one attention module
                 if 'other_traj_attention' in enc_params:
-                    print(f"[DEBUG] other_traj_attention keys: {list(enc_params['other_traj_attention'].keys())}")
+                    ota = enc_params['other_traj_attention']
+                    print(f"[DEBUG] other_traj_attention keys: {list(ota.keys())}")
+                    if 'attn_0' in ota:
+                        print(f"[DEBUG] attn_0 keys: {list(ota['attn_0'].keys())}")
+                        # Check if Dense layers have non-zero weights
+                        for dense_key in list(ota['attn_0'].keys())[:2]:
+                            params = ota['attn_0'][dense_key]
+                            if 'kernel' in params:
+                                kernel = np.array(params['kernel'])
+                                print(f"[DEBUG] attn_0/{dense_key}/kernel: shape={kernel.shape}, "
+                                      f"mean={kernel.mean():.6f}, std={kernel.std():.6f}")
         
         # Extract encoder parameters
         if 'params' in self.params.policy and 'encoder_layer' in self.params.policy['params']:
