@@ -1,0 +1,577 @@
+"""Offline Attention + Semantic Feature Extraction for HSI Analysis.
+
+This script extracts attention weights and semantic features from scenarios
+using saved model checkpoints, enabling offline Head Specialization Analysis.
+
+Usage:
+    python offline_extraction.py --run_dir ../../runs/PPO_VEC_WAYFORMER \\
+                                  --dataset ../../training.tfrecord \\
+                                  --n_scenarios 100 \\
+                                  --output_dir ./extractions
+
+    # For evolution analysis (multiple checkpoints):
+    python offline_extraction.py --run_dir ../../runs/PPO_VEC_WAYFORMER \\
+                                  --checkpoints model_10000.pkl model_50000.pkl model_final.pkl \\
+                                  --n_scenarios 50
+"""
+
+import argparse
+import glob
+import os
+import pickle
+from typing import Any, Dict, List, Optional, Tuple
+
+import jax
+import jax.numpy as jnp
+import numpy as np
+from waymax import dynamics
+
+from vmax.simulator import make_env_for_evaluation, datasets, make_data_generator
+from vmax.agents.learning.reinforcement.ppo import ppo_factory
+from vmax.agents.networks import network_utils
+from vmax.scripts.evaluate.utils import load_params, load_yaml_config
+
+# Import local encoder for attention extraction
+from xai.local_encoder import LocalWayformerEncoder
+
+
+class OfflineExtractor:
+    """Extract attention weights and semantic features from scenarios.
+    
+    This class loads a trained model and processes scenarios to extract:
+    1. Raw attention weights from the Wayformer encoder
+    2. Aggregated per-vehicle attention for each head
+    3. Semantic features (TTC, distance, closing speed, spatial relationships)
+    4. Token boundaries for mapping attention to semantic entities
+    """
+    
+    # Time horizon for TTC computation (seconds)
+    TTC_HORIZON = 5.0
+    
+    def __init__(self, run_dir: str, dataset_path: str, checkpoint_name: str = "model_final.pkl"):
+        """Initialize the extractor.
+        
+        Args:
+            run_dir: Path to the training run directory.
+            dataset_path: Path to the dataset (tfrecord or dataset name).
+            checkpoint_name: Name of the checkpoint file to load.
+        """
+        self.run_dir = run_dir
+        self.dataset_path = dataset_path
+        self.checkpoint_name = checkpoint_name
+        
+        # Paths
+        self.config_path = os.path.join(run_dir, ".hydra/config.yaml")
+        self.model_dir = os.path.join(run_dir, "model")
+        
+        # Will be set during setup
+        self.env = None
+        self.encoder = None
+        self.params = None
+        self.config = None
+        self.encoder_params = None
+        self.token_boundaries = None
+        
+    def setup(self):
+        """Load model, config, and create environment."""
+        print(f"[OfflineExtractor] Loading config from {self.config_path}")
+        self.config = load_yaml_config(self.config_path)
+        
+        # Flatten nested config for compatibility
+        if "algorithm" in self.config and "network" in self.config["algorithm"]:
+            self.config["policy"] = self.config["algorithm"]["network"].get("policy", {})
+            self.config["value"] = self.config["algorithm"]["network"].get("value", {})
+            self.config["action_distribution"] = self.config["algorithm"]["network"].get("action_distribution", "gaussian")
+        if "network" in self.config and "encoder" in self.config["network"]:
+            self.config["encoder"] = self.config["network"]["encoder"]
+        
+        # Force vec observation type
+        obs_type = self.config.get("observation_type", "vec")
+        if obs_type != "vec":
+            print(f"[OfflineExtractor] Warning: Forcing observation_type='vec' (was '{obs_type}')")
+            obs_type = "vec"
+        
+        # Create environment
+        print("[OfflineExtractor] Creating environment...")
+        self.env = make_env_for_evaluation(
+            max_num_objects=self.config.get("max_num_objects", 64),
+            dynamics_model=dynamics.InvertibleBicycleModel(normalize_actions=True),
+            sdc_paths_from_data=not self.config.get("waymo_dataset", False),
+            observation_type=obs_type,
+            observation_config=self.config.get("observation_config", {}),
+            termination_keys=self.config.get("termination_keys", ["offroad", "overlap"]),
+        )
+        
+        # Create encoder with attention extraction enabled
+        unflatten_fn = self.env.get_wrapper_attr("features_extractor").unflatten_features
+        encoder_cfg = network_utils.parse_config(self.config["encoder"], "encoder")
+        encoder_cfg = network_utils.convert_to_dict_with_activation_fn(encoder_cfg)
+        
+        self.encoder = LocalWayformerEncoder(
+            unflatten_fn,
+            return_attention_weights=True,
+            **encoder_cfg
+        )
+        print(f"[OfflineExtractor] Encoder: {self.encoder}")
+        
+        # Compute token boundaries
+        self.token_boundaries = self._compute_token_boundaries()
+        print(f"[OfflineExtractor] Token boundaries: {self.token_boundaries}")
+        
+        # Load model parameters
+        self.load_checkpoint(self.checkpoint_name)
+        
+        return self
+    
+    def load_checkpoint(self, checkpoint_name: str):
+        """Load a specific checkpoint.
+        
+        Args:
+            checkpoint_name: Name of checkpoint file (e.g., 'model_final.pkl').
+        """
+        model_path = os.path.join(self.model_dir, checkpoint_name)
+        if not os.path.exists(model_path):
+            raise FileNotFoundError(f"Checkpoint not found: {model_path}")
+        
+        print(f"[OfflineExtractor] Loading checkpoint: {model_path}")
+        self.params = load_params(model_path)
+        
+        # Extract encoder parameters
+        if 'params' in self.params.policy and 'encoder_layer' in self.params.policy['params']:
+            self.encoder_params = self.params.policy['params']['encoder_layer']
+        else:
+            raise ValueError("Could not find 'encoder_layer' in policy params")
+        
+        return self
+    
+    def _compute_token_boundaries(self) -> Dict[str, Tuple[int, int]]:
+        """Compute token boundaries from observation config.
+        
+        Token boundaries map entity types to token index ranges.
+        """
+        obs_cfg = self.config.get("observation_config", {})
+        
+        n_timesteps = obs_cfg.get("obs_past_num_steps", 5)
+        n_sdc = 1 * n_timesteps  # SDC trajectory tokens
+        
+        obj_cfg = obs_cfg.get("objects", {})
+        n_vehicles = obj_cfg.get("num_closest_objects", 8)
+        n_other = n_vehicles * n_timesteps  # Other vehicle tokens
+        
+        rg_cfg = obs_cfg.get("roadgraphs", {})
+        n_roadgraph = rg_cfg.get("roadgraph_top_k", 200)
+        
+        tl_cfg = obs_cfg.get("traffic_lights", {})
+        n_traffic_lights = tl_cfg.get("num_closest_traffic_lights", 5)
+        tl_timesteps = n_timesteps  # Assume same as agent timesteps
+        n_tl = n_traffic_lights * tl_timesteps
+        
+        path_cfg = obs_cfg.get("path_target", {})
+        n_gps = path_cfg.get("num_points", 3)
+        
+        # Cumulative boundaries
+        boundaries = {
+            'sdc_traj': (0, n_sdc),
+            'other_traj': (n_sdc, n_sdc + n_other),
+            'roadgraph': (n_sdc + n_other, n_sdc + n_other + n_roadgraph),
+            'traffic_lights': (n_sdc + n_other + n_roadgraph, n_sdc + n_other + n_roadgraph + n_tl),
+            'gps_path': (n_sdc + n_other + n_roadgraph + n_tl, n_sdc + n_other + n_roadgraph + n_tl + n_gps),
+        }
+        
+        # Store counts for aggregation
+        self._n_vehicles = n_vehicles
+        self._n_timesteps = n_timesteps
+        self._n_roadgraph = n_roadgraph
+        self._n_traffic_lights = n_traffic_lights
+        
+        return boundaries
+    
+    def extract_attention(self, scenario) -> Dict[str, np.ndarray]:
+        """Extract attention weights from a scenario.
+        
+        Args:
+            scenario: Simulator state (single scenario, no batch dim).
+            
+        Returns:
+            Dictionary of attention weight arrays.
+        """
+        # Get observation
+        obs = self.env.observe(scenario)
+        if isinstance(obs, tuple):
+            raise ValueError("Observation is a tuple, expected flattened array")
+        
+        # Forward pass with attention extraction
+        @jax.jit
+        def forward_with_attention(e_params, observation):
+            latent, attention_weights = self.encoder.apply(
+                {'params': e_params},
+                observation
+            )
+            return latent, attention_weights
+        
+        _, attn_weights = forward_with_attention(self.encoder_params, obs)
+        
+        # Convert to numpy
+        attn_weights = jax.tree_util.tree_map(
+            lambda x: np.array(jax.device_get(x)),
+            attn_weights
+        )
+        
+        return attn_weights
+    
+    def aggregate_vehicle_attention(self, attention_weights: Dict[str, np.ndarray]) -> np.ndarray:
+        """Aggregate attention weights per vehicle per head.
+        
+        Args:
+            attention_weights: Raw attention weights from encoder.
+            
+        Returns:
+            Array of shape (n_heads, n_vehicles) with aggregated attention.
+        """
+        # Get the cross-attention to other vehicles
+        key = "other_traj/cross_attn_0"
+        if key not in attention_weights:
+            print(f"[OfflineExtractor] Warning: '{key}' not found in attention weights")
+            return None
+        
+        # Shape: (batch, n_latents, n_tokens, n_heads)
+        attn = attention_weights[key]
+        
+        # Remove batch dimension if present
+        if attn.ndim == 4:
+            attn = attn[0]  # (n_latents, n_tokens, n_heads)
+        
+        n_latents, n_tokens, n_heads = attn.shape
+        n_vehicles = self._n_vehicles
+        n_timesteps = self._n_timesteps
+        
+        # Verify token count matches
+        expected_tokens = n_vehicles * n_timesteps
+        if n_tokens != expected_tokens:
+            print(f"[OfflineExtractor] Warning: Token count mismatch. Got {n_tokens}, expected {expected_tokens}")
+            return None
+        
+        # Reshape: (n_latents, n_tokens, n_heads) -> (n_latents, n_vehicles, n_timesteps, n_heads)
+        attn_reshaped = attn.reshape(n_latents, n_vehicles, n_timesteps, n_heads)
+        
+        # Sum over timesteps: -> (n_latents, n_vehicles, n_heads)
+        attn_per_vehicle = attn_reshaped.sum(axis=2)
+        
+        # Sum over latents: -> (n_vehicles, n_heads)
+        attn_final = attn_per_vehicle.sum(axis=0)
+        
+        # Transpose to (n_heads, n_vehicles) for easier correlation
+        attn_final = attn_final.T
+        
+        return attn_final
+    
+    def extract_semantic_features(self, scenario) -> Dict[str, np.ndarray]:
+        """Extract semantic features from a scenario.
+        
+        Adapted from AttentionLogger._extract_semantic_features().
+        
+        Args:
+            scenario: Simulator state.
+            
+        Returns:
+            Dictionary of semantic feature arrays.
+        """
+        semantic_features = {}
+        
+        try:
+            state = scenario
+            
+            # Get current timestep
+            timestep = np.array(jax.device_get(state.timestep)).flatten()
+            timestep = int(timestep[0]) if len(timestep) > 0 else 0
+            
+            traj = state.sim_trajectory
+            
+            # Get SDC index
+            is_sdc = np.array(jax.device_get(state.object_metadata.is_sdc))
+            if is_sdc.ndim > 1:
+                is_sdc = is_sdc[0]
+            sdc_index = int(np.argmax(is_sdc))
+            
+            # Extract trajectory data at current timestep
+            x = np.array(jax.device_get(traj.x))
+            y = np.array(jax.device_get(traj.y))
+            vel_x = np.array(jax.device_get(traj.vel_x))
+            vel_y = np.array(jax.device_get(traj.vel_y))
+            yaw = np.array(jax.device_get(traj.yaw))
+            valid = np.array(jax.device_get(traj.valid))
+            
+            # Handle dimensions
+            if x.ndim == 3:  # (batch, objects, time)
+                x = x[0, :, timestep]
+                y = y[0, :, timestep]
+                vel_x = vel_x[0, :, timestep]
+                vel_y = vel_y[0, :, timestep]
+                yaw = yaw[0, :, timestep]
+                valid = valid[0, :, timestep]
+            elif x.ndim == 2:  # (objects, time)
+                x = x[:, timestep]
+                y = y[:, timestep]
+                vel_x = vel_x[:, timestep]
+                vel_y = vel_y[:, timestep]
+                yaw = yaw[:, timestep]
+                valid = valid[:, timestep]
+            
+            # Limit to n_vehicles closest (matching observation)
+            n_vehicles = self._n_vehicles
+            
+            # Store metadata
+            semantic_features['sdc_index'] = sdc_index
+            semantic_features['timestep'] = timestep
+            semantic_features['valid'] = valid[:n_vehicles]
+            semantic_features['positions_x'] = x[:n_vehicles]
+            semantic_features['positions_y'] = y[:n_vehicles]
+            
+            # === Compute per-vehicle semantic features ===
+            
+            # 1. Distance to ego
+            ego_x, ego_y = x[sdc_index], y[sdc_index]
+            distances = np.sqrt((x[:n_vehicles] - ego_x)**2 + (y[:n_vehicles] - ego_y)**2)
+            semantic_features['distance_to_ego'] = distances
+            
+            # 2. Closing speed
+            ego_vx, ego_vy = vel_x[sdc_index], vel_y[sdc_index]
+            rel_x = x[:n_vehicles] - ego_x
+            rel_y = y[:n_vehicles] - ego_y
+            dist = np.sqrt(rel_x**2 + rel_y**2) + 1e-6
+            rel_vx = vel_x[:n_vehicles] - ego_vx
+            rel_vy = vel_y[:n_vehicles] - ego_vy
+            closing_speeds = -(rel_x * rel_vx + rel_y * rel_vy) / dist
+            semantic_features['closing_speed'] = closing_speeds
+            
+            # 3. Time-to-collision (TTC)
+            ttc = np.where(
+                closing_speeds > 0.5,
+                distances / (closing_speeds + 1e-6),
+                self.TTC_HORIZON
+            )
+            ttc = np.clip(ttc, 0, self.TTC_HORIZON)
+            semantic_features['ttc'] = ttc
+            
+            # 4. Spatial relationships
+            ego_yaw = yaw[sdc_index]
+            dx = x[:n_vehicles] - ego_x
+            dy = y[:n_vehicles] - ego_y
+            cos_yaw = np.cos(-ego_yaw)
+            sin_yaw = np.sin(-ego_yaw)
+            x_local = dx * cos_yaw - dy * sin_yaw
+            y_local = dx * sin_yaw + dy * cos_yaw
+            
+            semantic_features['is_ahead'] = (x_local > 2.0).astype(float)
+            semantic_features['is_behind'] = (x_local < -2.0).astype(float)
+            semantic_features['is_left'] = (y_local > 1.0).astype(float)
+            semantic_features['is_right'] = (y_local < -1.0).astype(float)
+            
+            # 5. Agent speeds
+            speeds = np.sqrt(vel_x[:n_vehicles]**2 + vel_y[:n_vehicles]**2)
+            semantic_features['agent_speeds'] = speeds
+            
+            # 6. Ego speed
+            ego_speed = np.sqrt(ego_vx**2 + ego_vy**2)
+            semantic_features['ego_speed'] = ego_speed
+            
+            # 7. Object types (if available)
+            if hasattr(state.object_metadata, 'object_types'):
+                obj_types = np.array(jax.device_get(state.object_metadata.object_types))
+                if obj_types.ndim > 1:
+                    obj_types = obj_types[0]
+                semantic_features['object_types'] = obj_types[:n_vehicles]
+            
+        except Exception as e:
+            print(f"[OfflineExtractor] Error extracting semantic features: {e}")
+            import traceback
+            traceback.print_exc()
+        
+        return semantic_features
+    
+    def extract_scenario(self, scenario, scenario_id: int = 0) -> Dict[str, Any]:
+        """Extract all data from a single scenario.
+        
+        Args:
+            scenario: Simulator state.
+            scenario_id: ID for this scenario.
+            
+        Returns:
+            Dictionary with all extracted data.
+        """
+        # Extract attention weights
+        attention_weights = self.extract_attention(scenario)
+        
+        # Aggregate per-vehicle attention
+        attention_per_vehicle = self.aggregate_vehicle_attention(attention_weights)
+        
+        # Extract semantic features
+        semantic_features = self.extract_semantic_features(scenario)
+        
+        return {
+            'scenario_id': scenario_id,
+            'attention_weights': attention_weights,
+            'attention_per_vehicle': attention_per_vehicle,
+            'semantic_features': semantic_features,
+            'token_boundaries': self.token_boundaries,
+            'metadata': {
+                'n_vehicles': self._n_vehicles,
+                'n_timesteps': self._n_timesteps,
+                'n_roadgraph': self._n_roadgraph,
+                'n_traffic_lights': self._n_traffic_lights,
+            }
+        }
+    
+    def run(self, n_scenarios: int, output_path: str) -> List[Dict[str, Any]]:
+        """Run extraction on multiple scenarios.
+        
+        Args:
+            n_scenarios: Number of scenarios to process.
+            output_path: Path to save the results.
+            
+        Returns:
+            List of extraction results.
+        """
+        # Create data generator
+        data_gen = make_data_generator(
+            path=datasets.get_dataset(self.dataset_path),
+            max_num_objects=self.config["max_num_objects"],
+            include_sdc_paths=not self.config.get("waymo_dataset", False),
+            batch_dims=(1,),
+            seed=42,
+            repeat=1,
+        )
+        
+        results = []
+        print(f"[OfflineExtractor] Processing {n_scenarios} scenarios...")
+        
+        for i, scenario_batch in enumerate(data_gen):
+            if i >= n_scenarios:
+                break
+            
+            # Squeeze batch dimension
+            scenario = jax.tree_util.tree_map(lambda x: x.squeeze(0), scenario_batch)
+            
+            print(f"  Scenario {i+1}/{n_scenarios}", end="")
+            
+            try:
+                result = self.extract_scenario(scenario, scenario_id=i)
+                results.append(result)
+                print(" ✓")
+            except Exception as e:
+                print(f" ✗ Error: {e}")
+        
+        # Save results
+        os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+        
+        # Extract checkpoint step from filename
+        checkpoint_step = self._parse_checkpoint_step(self.checkpoint_name)
+        
+        output_data = {
+            'checkpoint': self.checkpoint_name,
+            'step': checkpoint_step,
+            'run_dir': self.run_dir,
+            'n_scenarios': len(results),
+            'scenarios': results,
+            'config': {
+                'encoder': self.config.get('encoder', {}),
+                'observation_config': self.config.get('observation_config', {}),
+            }
+        }
+        
+        with open(output_path, 'wb') as f:
+            pickle.dump(output_data, f, protocol=pickle.HIGHEST_PROTOCOL)
+        
+        print(f"\n[OfflineExtractor] Saved {len(results)} scenarios to {output_path}")
+        print(f"[OfflineExtractor] Total file size: {os.path.getsize(output_path) / 1024 / 1024:.2f} MB")
+        
+        return results
+    
+    def _parse_checkpoint_step(self, checkpoint_name: str) -> int:
+        """Extract step number from checkpoint filename."""
+        import re
+        match = re.search(r'(\d+)', checkpoint_name)
+        return int(match.group(1)) if match else 0
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Extract attention weights and semantic features for HSI analysis."
+    )
+    parser.add_argument(
+        "--run_dir",
+        type=str,
+        required=True,
+        help="Path to the training run directory (contains .hydra/config.yaml and model/)"
+    )
+    parser.add_argument(
+        "--dataset",
+        type=str,
+        required=True,
+        help="Path to dataset (tfrecord file or dataset name)"
+    )
+    parser.add_argument(
+        "--n_scenarios",
+        type=int,
+        default=100,
+        help="Number of scenarios to process (default: 100)"
+    )
+    parser.add_argument(
+        "--output_dir",
+        type=str,
+        default="./extractions",
+        help="Directory to save extraction results (default: ./extractions)"
+    )
+    parser.add_argument(
+        "--checkpoints",
+        type=str,
+        nargs="+",
+        default=["model_final.pkl"],
+        help="Checkpoint file(s) to process (default: model_final.pkl)"
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="Random seed for scenario sampling (default: 42)"
+    )
+    
+    args = parser.parse_args()
+    
+    # Create output directory
+    os.makedirs(args.output_dir, exist_ok=True)
+    
+    # Process each checkpoint
+    extractor = None
+    for checkpoint in args.checkpoints:
+        print(f"\n{'='*60}")
+        print(f"Processing checkpoint: {checkpoint}")
+        print(f"{'='*60}")
+        
+        if extractor is None:
+            # First checkpoint: setup everything
+            extractor = OfflineExtractor(
+                run_dir=args.run_dir,
+                dataset_path=args.dataset,
+                checkpoint_name=checkpoint
+            )
+            extractor.setup()
+        else:
+            # Subsequent checkpoints: just load new params
+            extractor.load_checkpoint(checkpoint)
+        
+        # Generate output filename
+        checkpoint_base = os.path.splitext(checkpoint)[0]
+        output_path = os.path.join(args.output_dir, f"extraction_{checkpoint_base}.pkl")
+        
+        # Run extraction
+        extractor.run(n_scenarios=args.n_scenarios, output_path=output_path)
+    
+    print(f"\n{'='*60}")
+    print("Extraction complete!")
+    print(f"Results saved to: {args.output_dir}")
+    print(f"{'='*60}")
+
+
+if __name__ == "__main__":
+    main()
