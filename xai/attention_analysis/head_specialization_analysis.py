@@ -267,6 +267,12 @@ class HeadSpecializationAnalyzer:
                 attn_valid = attn_flat[valid_mask]
                 feat_valid = feat_flat[valid_mask]
                 
+                # Check for constant arrays (no variance)
+                if np.std(attn_valid) < 1e-10 or np.std(feat_valid) < 1e-10:
+                    # One or both arrays are constant → correlation undefined
+                    head_correlations[h] = 0.0
+                    continue
+                
                 # Compute Pearson correlation
                 r, _ = stats.pearsonr(attn_valid, feat_valid)
                 head_correlations[h] = r if np.isfinite(r) else 0.0
