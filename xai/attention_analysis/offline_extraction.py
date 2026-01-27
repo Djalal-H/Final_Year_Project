@@ -18,8 +18,14 @@ Usage:
 import argparse
 import glob
 import os
+import sys
 import pickle
 from typing import Any, Dict, List, Optional, Tuple
+
+# Add project root to sys.path to allow importing from 'xai'
+project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
 
 import jax
 import jax.numpy as jnp
