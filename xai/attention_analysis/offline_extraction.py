@@ -144,6 +144,19 @@ class OfflineExtractor:
         print(f"[OfflineExtractor] Loading checkpoint: {model_path}")
         self.params = load_params(model_path)
         
+        # Debug: print full policy params structure
+        print(f"\n[DEBUG] Policy params type: {type(self.params.policy)}")
+        if hasattr(self.params.policy, 'keys'):
+            print(f"[DEBUG] Policy top-level keys: {list(self.params.policy.keys())}")
+        if 'params' in self.params.policy:
+            print(f"[DEBUG] Policy['params'] keys: {list(self.params.policy['params'].keys())}")
+            if 'encoder_layer' in self.params.policy['params']:
+                enc_params = self.params.policy['params']['encoder_layer']
+                print(f"[DEBUG] encoder_layer keys: {list(enc_params.keys())}")
+                # Show nested structure of one attention module
+                if 'other_traj_attention' in enc_params:
+                    print(f"[DEBUG] other_traj_attention keys: {list(enc_params['other_traj_attention'].keys())}")
+        
         # Extract encoder parameters
         if 'params' in self.params.policy and 'encoder_layer' in self.params.policy['params']:
             self.encoder_params = self.params.policy['params']['encoder_layer']
