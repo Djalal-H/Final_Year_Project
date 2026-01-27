@@ -241,7 +241,15 @@ class OfflineExtractor:
             print(f"\n[DEBUG] Observation shape (with batch): {obs_np.shape}")
             print(f"[DEBUG] Obs min: {obs_np.min():.4f}, max: {obs_np.max():.4f}, mean: {obs_np.mean():.4f}")
             print(f"[DEBUG] Obs std: {obs_np.std():.4f}")
-            print(f"[DEBUG] Non-zero elements: {np.count_nonzero(obs_np)} / {obs_np.size}")
+            
+            # Debug: check what unflatten_fn produces
+            unflatten_fn = self.env.get_wrapper_attr("features_extractor").unflatten_features
+            features, masks = unflatten_fn(obs)
+            print(f"\n[DEBUG] After unflatten_fn:")
+            print(f"[DEBUG] other_traj_features shape: {features[1].shape}")
+            print(f"[DEBUG] other_traj_features mean: {np.mean(features[1]):.4f}, std: {np.std(features[1]):.4f}")
+            print(f"[DEBUG] other_traj_valid_mask shape: {masks[1].shape}")
+            print(f"[DEBUG] other_traj_valid_mask: {masks[1]}")  # Print actual mask values
             
             # Check encoder params structure
             print(f"\n[DEBUG] Encoder params keys: {list(self.encoder_params.keys())[:10]}...")
