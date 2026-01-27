@@ -255,6 +255,17 @@ class OfflineExtractor:
             mask_arr = np.array(masks[1])
             print(f"[DEBUG] other_traj_valid_mask True count: {mask_arr.sum()} / {mask_arr.size}")
             
+            # Debug: check the RAW feature array BEFORE stripping valid column
+            raw_feat = vectorized_obs_check = obs
+            total_per_obj = 8  # 8 features based on config
+            sdc_size = 1 * 5 * total_per_obj
+            other_start = sdc_size
+            other_size = 8 * 5 * total_per_obj
+            raw_other = np.array(obs[..., other_start:other_start + other_size]).reshape(1, 8, 5, total_per_obj)
+            print(f"\n[DEBUG] Raw other_traj (before unflatten strips valid):")
+            print(f"[DEBUG] Shape: {raw_other.shape}")
+            print(f"[DEBUG] Last column (valid?): {raw_other[0, :, 0, -1]}")  # Should be 1s for valid objects
+            
             # Check encoder params structure
             print(f"\n[DEBUG] Encoder params keys: {list(self.encoder_params.keys())[:10]}...")
         
