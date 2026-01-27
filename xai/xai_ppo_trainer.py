@@ -1,9 +1,9 @@
 # Copyright 2025 Valeo.
 
-"""XAI-enabled Proximal Policy Optimization (PPO) trainer with attention extraction.
+"""Proximal Policy Optimization (PPO) trainer for V-Max.
 
-This trainer extends the standard PPO trainer to periodically extract and log
-attention weights for offline Head Specialization Analysis.
+Standard PPO training implementation. For XAI analysis (attention extraction,
+head specialization), use offline analysis scripts after training completes.
 """
 
 from __future__ import annotations
@@ -27,110 +27,7 @@ from vmax.scripts.training import train_utils
 from vmax.simulator import metrics as _metrics
 
 
-from xai.attention_logger import AttentionLogger
-from xai.local_encoder import LocalWayformerEncoder
 
-
-def extract_attention_online(
-    env,
-    params,
-    network_config: dict,
-    scenarios_list: list,
-    n_samples: int = 4,
-) -> dict:
-    """Extract attention weights from encoder during training.
-    
-    Processes scenarios sequentially (one at a time) since env.observe()
-    doesn't support batched scenarios. This mirrors the approach in
-    offline_attention_extraction.ipynb.
-    
-    Args:
-        env: The environment (used for observe and unflatten_fn).
-        params: Current training parameters (PPONetworkParams).
-        network_config: Network configuration dictionary.
-        scenarios_list: List of individual scenarios (already squeezed).
-        n_samples: Number of samples to extract attention for.
-        
-    Returns:
-        Dictionary of attention weights from WayformerEncoder.
-        Each value is stacked across all samples.
-    """
-    # Get unflatten function from environment
-    unflatten_fn = env.get_wrapper_attr("features_extractor").unflatten_features
-    
-    # Parse and convert encoder config
-    encoder_cfg = network_config.get('encoder', {})
-    encoder_cfg = network_utils.parse_config(encoder_cfg, "encoder")
-    encoder_cfg = network_utils.convert_to_dict_with_activation_fn(encoder_cfg)
-    
-    # Build LOCAL encoder with return_attention_weights=True
-    # This encoder handles roadgraph shapes correctly (no extra batch dimension)
-    encoder = LocalWayformerEncoder(
-        unflatten_fn,
-        return_attention_weights=True,
-        **encoder_cfg
-    )
-    
-    # Extract encoder params from policy params
-    if 'params' in params.policy and 'encoder_layer' in params.policy['params']:
-        encoder_params = params.policy['params']['encoder_layer']
-    else:
-        raise ValueError("Could not find 'encoder_layer' in policy params")
-    
-    # Process scenarios one at a time (env.observe doesn't support batching)
-    all_attention_weights = []
-    
-    print(f"[XAI DEBUG] Processing {len(scenarios_list)} scenarios for attention extraction...")
-    
-    for i, single_scenario in enumerate(scenarios_list):
-        print(f"\n[XAI DEBUG] ===== Processing scenario {i+1}/{len(scenarios_list)} =====")
-        
-        # Debug: Check scenario structure
-        if hasattr(single_scenario, 'roadgraph_points'):
-            print(f"[XAI DEBUG]   roadgraph.x shape: {single_scenario.roadgraph_points.x.shape}")
-        if hasattr(single_scenario, 'timestep'):
-            ts = single_scenario.timestep
-            ts_shape = ts.shape if hasattr(ts, 'shape') else 'scalar'
-            # Only convert to int if it's a scalar (0-d array)
-            if hasattr(ts, 'ndim') and ts.ndim == 0:
-                ts_value = int(ts.item())
-            elif hasattr(ts, 'shape'):
-                ts_value = f"array{ts.shape}"
-            else:
-                ts_value = ts
-            print(f"[XAI DEBUG]   timestep shape: {ts_shape}, value: {ts_value}")
-        
-        # Get observation for single scenario
-        try:
-            obs = env.observe(single_scenario)
-            print(f"[XAI DEBUG] ✓ Observation shape: {obs.shape}")
-        except Exception as e:
-            print(f"[XAI DEBUG] ✗ Error in env.observe for scenario {i}: {e}")
-            import traceback
-            traceback.print_exc()
-            raise
-        
-        # Add batch dimension for encoder
-        if obs.ndim == 1:
-            obs = jnp.expand_dims(obs, axis=0)
-        
-        # Run forward pass with attention extraction
-        _, attention_weights = encoder.apply({'params': encoder_params}, obs)
-        all_attention_weights.append(attention_weights)
-        print(f"[XAI DEBUG] ✓ Extracted attention with {len(attention_weights)} keys")
-    
-    # Stack attention weights across samples
-    # Each key will have shape (n_samples, ...) after stacking
-    stacked_weights = {}
-    if all_attention_weights:
-        keys = all_attention_weights[0].keys()
-        for key in keys:
-            stacked_weights[key] = jnp.concatenate(
-                [aw[key] for aw in all_attention_weights],
-                axis=0
-            )
-    
-    return stacked_weights
 
 
 
@@ -167,15 +64,9 @@ def train(
     progress_fn: Callable[[int, datatypes.Metrics], None] = lambda *args: None,
     checkpoint_logdir: str = "",
     disable_tqdm: bool = False,
-    # XAI-specific parameters
-    attention_log_freq: int = 1000,
-    attention_log_dir: str = "",
-    attention_n_samples: int = 4,
-) -> None:
-    """Train a PPO agent with attention weight extraction for XAI.
 
-    This is an extended version of the standard PPO trainer that periodically
-    extracts and logs attention weights for offline Head Specialization Analysis.
+) -> None:
+    """Train a PPO agent using Proximal Policy Optimization.
 
     Args:
         env: An instance of the planning environment.
@@ -205,19 +96,14 @@ def train(
         progress_fn: Callback function for reporting progress.
         checkpoint_logdir: Directory path for saving checkpoints.
         disable_tqdm: Flag to disable tqdm progress bar.
-        attention_log_freq: Frequency to log attention weights (every N steps).
-        attention_log_dir: Directory to save attention logs. If empty, no logging.
-        attention_n_samples: Number of samples per batch to log (to save space).
-
     """
-    print(" XAI PPO ".center(40, "="))
+    print(" PPO Training ".center(40, "="))
 
     rng = jax.random.PRNGKey(seed)
     num_devices = jax.local_device_count()
 
     do_save = save_freq > 1 and checkpoint_logdir is not None
     do_evaluation = eval_freq >= 1
-    do_attention_logging = attention_log_dir != ""
 
     env_step_per_training_step = batch_size * unroll_length * num_minibatches
     total_iters = (total_timesteps // env_step_per_training_step) + 1
@@ -278,25 +164,12 @@ def train(
     run_training = jax.pmap(run_training, axis_name="batch")
     run_evaluation = jax.pmap(run_evaluation, axis_name="batch")
 
-    # Initialize attention logger if enabled
-    attention_logger = None
-    if do_attention_logging:
-        attention_log_path = os.path.join(attention_log_dir, "attention_logs")
-        encoder_config = network_config.get('encoder', {})
-        attention_logger = AttentionLogger(
-            output_dir=attention_log_path,
-            config=encoder_config,
-        )
-        print(f"-> Attention logging enabled. Logging every {attention_log_freq} steps.")
-        print(f"   Output: {attention_log_path}")
-        print(f"   Samples per log: {attention_n_samples}")
-
     time_training = perf_counter()
 
     current_step = 0
 
     print("-> Ground Control to Major Tom...")
-    for iter in tqdm(range(total_iters), desc="XAI Training", total=total_iters, dynamic_ncols=True, disable=disable_tqdm):
+    for iter in tqdm(range(total_iters), desc="PPO Training", total=total_iters, dynamic_ncols=True, disable=disable_tqdm):
         rng, iter_key = jax.random.split(rng)
         iter_keys = jax.random.split(iter_key, num_devices)
 
@@ -331,57 +204,6 @@ def train(
 
         epoch_log_time = perf_counter() - t
 
-        # Attention logging (XAI) - Online attention extraction
-        # Log every N iterations (more reliable than step-based since steps don't align)
-        t = perf_counter()
-        log_interval_iters = max(1, attention_log_freq // env_step_per_training_step)
-        should_log = attention_logger and iter > 0 and iter % log_interval_iters == 0
-        if should_log:
-            print(f"[XAI] Extracting & logging attention at step {current_step} (iteration {iter})...")
-            try:
-                # Sample fresh scenarios from data generator (like offline notebook does)
-                # This avoids the complex scenario structure from training batches
-                sample_scenarios_list = []
-                for i in range(attention_n_samples):
-                    scenario_batch = next(data_generator)
-                    # Squeeze batch dim (offline notebook uses squeeze(0), not indexing)
-                    scenario = jax.tree_util.tree_map(lambda x: x.squeeze(0), scenario_batch)
-                    sample_scenarios_list.append(scenario)
-                
-                # Extract real attention weights online (processes scenarios sequentially)
-                current_params = pmap.unpmap(training_state.params)
-                attention_weights = extract_attention_online(
-                    env, 
-                    current_params, 
-                    network_config, 
-                    sample_scenarios_list,
-                    n_samples=attention_n_samples
-                )
-                # Convert to numpy for logging
-                attention_weights = jax.tree_util.tree_map(
-                    lambda x: np.array(jax.device_get(x)), 
-                    attention_weights
-                )
-                
-                # Log attention weights with semantic features
-                # Use first scenario for semantic features (they're all from same distribution)
-                attention_logger.log(
-                    step=current_step,
-                    attention_weights=attention_weights,
-                    simulator_state=sample_scenarios_list[0] if sample_scenarios_list else None,
-                    n_samples=attention_n_samples
-                )
-                print(f"[XAI] Successfully logged attention for step {current_step}")
-                print(f"[XAI] Attention keys: {list(attention_weights.keys())}")
-                metrics["xai/attention_log_count"] = current_step // attention_log_freq
-                
-            except Exception as e:
-                print(f"[XAI] Warning: Attention logging failed at step {current_step}: {e}")
-                import traceback
-                traceback.print_exc()
-
-        epoch_attention_time = perf_counter() - t
-
         # Evaluation
         t = perf_counter()
         if do_evaluation and not iter % eval_freq:
@@ -397,9 +219,8 @@ def train(
             metrics["runtime/data_time"] = epoch_data_time
             metrics["runtime/training_time"] = epoch_training_time
             metrics["runtime/log_time"] = epoch_log_time
-            metrics["runtime/attention_time"] = epoch_attention_time
             metrics["runtime/eval_time"] = epoch_eval_time
-            metrics["runtime/iter_time"] = epoch_data_time + epoch_training_time + epoch_log_time + epoch_eval_time + epoch_attention_time
+            metrics["runtime/iter_time"] = epoch_data_time + epoch_training_time + epoch_log_time + epoch_eval_time
             metrics["runtime/wall_time"] = perf_counter() - time_training
             metrics["train/rl_gradient_steps"] = int(pmap.unpmap(training_state.rl_gradient_steps))
             metrics["train/env_steps"] = current_step
@@ -415,11 +236,6 @@ def train(
     if checkpoint_logdir:
         path = f"{checkpoint_logdir}/model_final.pkl"
         train_utils.save_params(path, pmap.unpmap(training_state.params))
-
-    # Close attention logger
-    if attention_logger:
-        attention_logger.close()
-        print("[XAI] Attention logging complete.")
 
     pmap.assert_is_replicated(training_state)
     pmap.synchronize_hosts()
