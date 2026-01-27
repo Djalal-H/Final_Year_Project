@@ -225,11 +225,12 @@ class OfflineExtractor:
         
         return attn_weights
     
-    def aggregate_vehicle_attention(self, attention_weights: Dict[str, np.ndarray]) -> np.ndarray:
+    def aggregate_vehicle_attention(self, attention_weights: Dict[str, np.ndarray], debug: bool = True) -> np.ndarray:
         """Aggregate attention weights per vehicle per head.
         
         Args:
             attention_weights: Raw attention weights from encoder.
+            debug: If True, print debug information.
             
         Returns:
             Array of shape (n_heads, n_vehicles) with aggregated attention.
@@ -238,10 +239,16 @@ class OfflineExtractor:
         key = "other_traj/cross_attn_0"
         if key not in attention_weights:
             print(f"[OfflineExtractor] Warning: '{key}' not found in attention weights")
+            print(f"[OfflineExtractor] Available keys: {list(attention_weights.keys())}")
             return None
         
         # Shape: (batch, n_latents, n_tokens, n_heads)
         attn = attention_weights[key]
+        
+        if debug:
+            print(f"\n[DEBUG] Raw attention shape: {attn.shape}")
+            print(f"[DEBUG] Min: {attn.min():.6f}, Max: {attn.max():.6f}, Mean: {attn.mean():.6f}")
+            print(f"[DEBUG] Std: {attn.std():.6f}")
         
         # Remove batch dimension if present
         if attn.ndim == 4:
@@ -250,6 +257,11 @@ class OfflineExtractor:
         n_latents, n_tokens, n_heads = attn.shape
         n_vehicles = self._n_vehicles
         n_timesteps = self._n_timesteps
+        
+        if debug:
+            print(f"[DEBUG] After squeeze: shape={attn.shape}")
+            print(f"[DEBUG] n_latents={n_latents}, n_tokens={n_tokens}, n_heads={n_heads}")
+            print(f"[DEBUG] Expected: n_vehicles={n_vehicles}, n_timesteps={n_timesteps}, product={n_vehicles * n_timesteps}")
         
         # Verify token count matches
         expected_tokens = n_vehicles * n_timesteps
@@ -260,11 +272,25 @@ class OfflineExtractor:
         # Reshape: (n_latents, n_tokens, n_heads) -> (n_latents, n_vehicles, n_timesteps, n_heads)
         attn_reshaped = attn.reshape(n_latents, n_vehicles, n_timesteps, n_heads)
         
+        if debug:
+            print(f"[DEBUG] Reshaped: {attn_reshaped.shape}")
+            # Check if attention per token varies by vehicle
+            sample_latent_0_head_0 = attn_reshaped[0, :, :, 0]  # (n_vehicles, n_timesteps)
+            print(f"[DEBUG] Sample attention (latent 0, head 0):")
+            print(f"        Per-vehicle sums: {sample_latent_0_head_0.sum(axis=1)}")
+        
         # Sum over timesteps: -> (n_latents, n_vehicles, n_heads)
         attn_per_vehicle = attn_reshaped.sum(axis=2)
         
+        if debug:
+            print(f"[DEBUG] After sum over timesteps: {attn_per_vehicle.shape}")
+        
         # Sum over latents: -> (n_vehicles, n_heads)
         attn_final = attn_per_vehicle.sum(axis=0)
+        
+        if debug:
+            print(f"[DEBUG] After sum over latents: {attn_final.shape}")
+            print(f"[DEBUG] Final per-vehicle attention:\n{attn_final}")
         
         # Transpose to (n_heads, n_vehicles) for easier correlation
         attn_final = attn_final.T
@@ -494,8 +520,17 @@ class OfflineExtractor:
         return results
     
     def _parse_checkpoint_step(self, checkpoint_name: str) -> int:
-        """Extract step number from checkpoint filename."""
+        """Extract step number from checkpoint filename.
+        
+        Returns:
+            Step number from filename, or -1 for 'model_final.pkl' (indicates final checkpoint)
+        """
         import re
+        
+        # Special case for final model
+        if 'final' in checkpoint_name.lower():
+            return -1  # -1 indicates final checkpoint (step unknown)
+        
         match = re.search(r'(\d+)', checkpoint_name)
         return int(match.group(1)) if match else 0
 
