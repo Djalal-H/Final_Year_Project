@@ -247,9 +247,13 @@ class OfflineExtractor:
             features, masks = unflatten_fn(obs)
             print(f"\n[DEBUG] After unflatten_fn:")
             print(f"[DEBUG] other_traj_features shape: {features[1].shape}")
-            print(f"[DEBUG] other_traj_features mean: {np.mean(features[1]):.4f}, std: {np.std(features[1]):.4f}")
+            feat_arr = np.array(features[1])
+            print(f"[DEBUG] other_traj_features min: {feat_arr.min():.4f}, max: {feat_arr.max():.4f}")
+            print(f"[DEBUG] other_traj_features mean: {feat_arr.mean():.4f}, std: {feat_arr.std():.4f}")
+            print(f"[DEBUG] other_traj_features non-zero: {np.count_nonzero(feat_arr)} / {feat_arr.size}")
             print(f"[DEBUG] other_traj_valid_mask shape: {masks[1].shape}")
-            print(f"[DEBUG] other_traj_valid_mask: {masks[1]}")  # Print actual mask values
+            mask_arr = np.array(masks[1])
+            print(f"[DEBUG] other_traj_valid_mask True count: {mask_arr.sum()} / {mask_arr.size}")
             
             # Check encoder params structure
             print(f"\n[DEBUG] Encoder params keys: {list(self.encoder_params.keys())[:10]}...")
