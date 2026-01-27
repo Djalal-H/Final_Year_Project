@@ -555,7 +555,10 @@ class OfflineExtractor:
             
             try:
                 # Reset env to properly initialize the state
-                reset_state = self.env.reset(scenario)
+                env_transition = self.env.reset(scenario)
+                
+                # Extract the SimulatorState from the EnvTransition
+                reset_state = env_transition.state
                 
                 # Use reset_state for extraction (not raw scenario)
                 result = self.extract_scenario(reset_state, scenario_id=i)
