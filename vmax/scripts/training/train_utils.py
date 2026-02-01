@@ -187,6 +187,12 @@ def print_hyperparameters(args: dict) -> None:
     print(f"- Dataset Path       : {args['path_dataset']}")
     print(f"- Total Timesteps    : {args['total_timesteps']}")
 
+    #Encoder Hyperparameters
+    print("Encoder Hyperparameters".center(40, "="))
+    print(f"- Encoder Type       : {args['network']['encoder']['type']}")
+    print(f"Number of Heads      : {args['network']['encoder']['num_heads']}")
+    ")
+
 
 def get_and_print_device_info() -> int:
     """Display and return the count of local JAX devices."""
