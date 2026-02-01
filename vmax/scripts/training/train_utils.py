@@ -190,7 +190,7 @@ def print_hyperparameters(args: dict) -> None:
     #Encoder Hyperparameters
     print("Encoder Hyperparameters".center(40, "="))
     print(f"- Encoder Type       : {args['network']['encoder']['type']}")
-    print(f"Number of Heads      : {args['network']['encoder']['num_heads']}")
+    print(f"Number of Heads      : {args['network']['encoder']['latent_num_heads']}")
 
 
 def get_and_print_device_info() -> int:
