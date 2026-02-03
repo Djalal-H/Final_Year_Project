@@ -142,6 +142,10 @@ class OfflineExtractor:
             raise FileNotFoundError(f"Checkpoint not found: {model_path}")
         
         print(f"[OfflineExtractor] Loading checkpoint: {model_path}")
+        
+        # Update checkpoint_name so metadata is correct when saving
+        self.checkpoint_name = checkpoint_name
+        
         self.params = load_params(model_path)
         
         # Debug: print full policy params structure
