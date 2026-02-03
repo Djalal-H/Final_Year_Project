@@ -160,7 +160,8 @@ class HeadSpecializationAnalyzer:
         """Load extraction data from pickle file.
         
         Args:
-            extraction_file: Specific extraction file to load. If None, loads the first .pkl file found.
+            extraction_file: Specific extraction file to load. If None, intelligently selects 
+                           the most advanced checkpoint (final or highest step).
         """
         if extraction_file is None:
             # Find extraction files
@@ -168,8 +169,39 @@ class HeadSpecializationAnalyzer:
             files = sorted(glob.glob(pattern))
             if not files:
                 raise FileNotFoundError(f"No extraction files found in {self.extraction_dir}")
-            extraction_file = files[0]
-            print(f"[HSI Analyzer] Auto-selected: {os.path.basename(extraction_file)}")
+            
+            # Smart selection: prioritize 'final' or highest step number
+            final_file = None
+            max_step = -1
+            max_step_file = None
+            
+            for fpath in files:
+                fname = os.path.basename(fpath)
+                
+                # Check if this is the final model
+                if 'final' in fname.lower():
+                    final_file = fpath
+                    continue
+                
+                # Extract step number from filename
+                import re
+                match = re.search(r'model_(\d+)', fname)
+                if match:
+                    step = int(match.group(1))
+                    if step > max_step:
+                        max_step = step
+                        max_step_file = fpath
+            
+            # Prioritize final, then highest step, then first file
+            if final_file:
+                extraction_file = final_file
+                print(f"[HSI Analyzer] Auto-selected final checkpoint: {os.path.basename(extraction_file)}")
+            elif max_step_file:
+                extraction_file = max_step_file
+                print(f"[HSI Analyzer] Auto-selected highest step ({max_step}): {os.path.basename(extraction_file)}")
+            else:
+                extraction_file = files[0]
+                print(f"[HSI Analyzer] Auto-selected first file: {os.path.basename(extraction_file)}")
         else:
             extraction_file = os.path.join(self.extraction_dir, extraction_file)
         
