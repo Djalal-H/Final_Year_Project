@@ -313,6 +313,24 @@ class VecFeaturesExtractor(extractor.AbstractFeaturesExtractor):
         )
         unflatten_size += path_target_size
 
+        if flatten_size != unflatten_size:
+            print(f"\n=== OBSERVATION SIZE MISMATCH DEBUG ===")
+            print(f"Expected (from observation): {flatten_size}")
+            print(f"Calculated (from config): {unflatten_size}")
+            print(f"Difference: {flatten_size - unflatten_size}")
+            print(f"\nBreakdown:")
+            print(f"  SDC objects: {sdc_object_size} (1 x {self._obs_past_num_steps} x {object_features_size})")
+            print(f"  Other objects: {other_objects_size} ({self._num_closest_objects} x {self._obs_past_num_steps} x {object_features_size})")
+            print(f"  Roadgraph: {roadgraph_size} ({self._roadgraph_top_k} x {roadgraph_features_size})")
+            print(f"  Traffic lights: {traffic_lights_size} ({self._num_closest_traffic_lights} x {self._obs_past_num_steps} x {traffic_lights_features_size})")
+            print(f"  Path target: {path_target_size} ({self._num_target_path_points} x {path_target_feature_size})")
+            print(f"\nFeature sizes:")
+            print(f"  Object features: {object_features_size} (keys: {self._object_features_key})")
+            print(f"  Roadgraph features: {roadgraph_features_size} (keys: {self._roadgraph_features_key})")
+            print(f"  Traffic light features: {traffic_lights_features_size} (keys: {self._traffic_lights_features_key})")
+            print(f"  Path target features: {path_target_feature_size} (keys: {self._path_target_features_key})")
+            print(f"=====================================\n")
+
         assert flatten_size == unflatten_size, f"Unflatten size {unflatten_size} does not match {flatten_size}"
 
         features = (
