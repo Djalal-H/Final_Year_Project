@@ -2,7 +2,6 @@ import os
 import argparse
 import jax
 import numpy as np
-import jax.numpy as jnp
 import yaml
 from functools import partial
 from tqdm import tqdm
@@ -118,21 +117,6 @@ def main():
 
     config["unflatten_config"] = config.get("observation_config", {})
     
-    # Check if config has unsupported features - we'll need to handle them
-    unsupported_features = []
-    if "roadgraphs" in config["observation_config"] and "features" in config["observation_config"]["roadgraphs"]:
-        SUPPORTED_ROADGRAPH_FEATURES = ["waypoints", "direction", "valid", "types"]
-        original_features = config["observation_config"]["roadgraphs"]["features"]
-        unsupported_features = [f for f in original_features if f not in SUPPORTED_ROADGRAPH_FEATURES]
-        
-        if unsupported_features:
-            print(f"Warning: Model was trained with unsupported roadgraph features: {unsupported_features}")
-            print(f"These will be replaced with zeros during evaluation.")
-            # Remove them from config so observation extraction doesn't fail
-            config["observation_config"]["roadgraphs"]["features"] = [
-                f for f in original_features if f in SUPPORTED_ROADGRAPH_FEATURES
-            ]
-    
     termination_keys = config["termination_keys"]
     
     # Create environment
@@ -157,70 +141,7 @@ def main():
     # Load policy
     print(f"-> Loading model from: {model_path}")
     policy = utils.load_model(env, config["algorithm"]["name"], config, model_path)
-    
-    # Create a wrapper to pad observations if needed
-    def pad_observation_for_missing_features(obs, num_missing_rg_features=0):
-        """Pad roadgraph features with zeros if model expects more features than provided."""
-        if num_missing_rg_features == 0:
-            return obs
-        
-        # Calculate where roadgraph features are in the flattened observation
-        object_features_size = env.get_wrapper_attr("features_extractor").get_features_size(
-            env.get_wrapper_attr("features_extractor")._object_features_key
-        )
-        sdc_size = 1 * args.obs_past_num_steps * object_features_size if hasattr(args, 'obs_past_num_steps') else 1 * 5 * object_features_size
-        other_size = env.get_wrapper_attr("features_extractor")._num_closest_objects * \
-                     env.get_wrapper_attr("features_extractor")._obs_past_num_steps * object_features_size
-        
-        rg_start = sdc_size + other_size
-        rg_points = env.get_wrapper_attr("features_extractor")._roadgraph_top_k
-        rg_features_current = env.get_wrapper_attr("features_extractor").get_features_size(
-            env.get_wrapper_attr("features_extractor")._roadgraph_features_key
-        )
-        rg_size_current = rg_points * rg_features_current
-        rg_end = rg_start + rg_size_current
-        
-        # Split observation into parts
-        before_rg = obs[..., :rg_start]
-        rg_obs = obs[..., rg_start:rg_end]
-        after_rg = obs[..., rg_end:]
-        
-        # Reshape roadgraph to (points, features)
-        rg_reshaped = rg_obs.reshape(*obs.shape[:-1], rg_points, rg_features_current)
-        
-        # Add zero padding for missing features (insert before 'valid' which is last)
-        # Current: [xy(2), dir_xy(2), valid(1)] = 5 features
-        # Need: [xy(2), dir_xy(2), speed_limit(1), valid(1)] = 6 features  
-        # Insert zeros at position -1 (before valid)
-        padding = jnp.zeros((*rg_reshaped.shape[:-1], num_missing_rg_features))
-        rg_padded = jnp.concatenate([
-            rg_reshaped[..., :-1],  # All except valid
-            padding,                 # Missing features as zeros
-            rg_reshaped[..., -1:]   # Valid flag
-        ], axis=-1)
-        
-        # Flatten back
-        rg_padded_flat = rg_padded.reshape(*obs.shape[:-1], -1)
-        
-        # Reconstruct observation
-        return jnp.concatenate([before_rg, rg_padded_flat, after_rg], axis=-1)
-    
-    # Determine if we need padding
-    num_missing = len(unsupported_features) if unsupported_features else 0
-    
-    # Wrap the step function to apply padding
-    original_step_fn = partial(pipeline.policy_step, env=env, policy_fn=policy)
-    
-    if num_missing > 0:
-        def padded_step_fn(env_transition, key):
-            # Pad the observation before passing to policy
-            padded_obs = pad_observation_for_missing_features(env_transition.observation, num_missing)
-            padded_transition = env_transition.replace(observation=padded_obs)
-            return original_step_fn(padded_transition, key=key)
-        step_fn = padded_step_fn
-    else:
-        step_fn = original_step_fn
-
+    step_fn = partial(pipeline.policy_step, env=env, policy_fn=policy)
     
     # 3. Run Quick Evaluation
     print(f"-> Running evaluation on {args.num_scenarios} scenarios...")
