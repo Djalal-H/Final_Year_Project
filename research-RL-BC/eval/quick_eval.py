@@ -167,8 +167,7 @@ def main():
             
         rng_key, scenario_key = jax.random.split(rng_key)
         
-        # Run scenario (simplified run_scenario_jit for single scenario)
-        scenario_key = jax.random.split(scenario_key, 1)
+        # Run scenario - scenario_key should be a single key, not an array
         episode_metrics, steps_done = utils.run_scenario_jit(
             scenario, 
             scenario_key, 
