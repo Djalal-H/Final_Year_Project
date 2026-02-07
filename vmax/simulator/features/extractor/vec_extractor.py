@@ -24,7 +24,6 @@ FEATURE_MAP = {
     "types": ("types",),
     "state": ("state",),
     "object_types": ("object_types",),
-    "speed_limit": ("speed_limit",),
 }
 
 
