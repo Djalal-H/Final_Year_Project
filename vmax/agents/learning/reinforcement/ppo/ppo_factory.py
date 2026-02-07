@@ -146,10 +146,17 @@ def make_networks(
         An instance of PPONetworks.
 
     """
-    if "gaussian" in network_config["action_distribution"]:
+    # Handle action distribution - be flexible with string matching
+    action_dist = str(network_config.get("action_distribution", "gaussian")).lower()
+    
+    if "gaussian" in action_dist or "normal" in action_dist:
         parametric_action_distribution = networks.NormalTanhDistribution(event_size=action_size)
-    elif "beta" in network_config["action_distribution"]:
+    elif "beta" in action_dist:
         parametric_action_distribution = networks.BetaDistribution(event_size=action_size)
+    else:
+        # Default to Gaussian if unknown
+        print(f"Warning: Unknown action_distribution '{action_dist}', defaulting to Gaussian")
+        parametric_action_distribution = networks.NormalTanhDistribution(event_size=action_size)
 
     output_size = parametric_action_distribution.param_size
 
