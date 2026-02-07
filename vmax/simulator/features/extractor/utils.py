@@ -65,7 +65,7 @@ def get_feature_size(feature_key: str, dict_mapping: dict) -> int:
     """
     if feature_key in ["xy", "vel_xy", "dir_xy"]:
         return 2
-    elif feature_key in ["speed", "length", "width", "height", "valid", "yaw", "arc_length"]:
+    elif feature_key in ["speed", "length", "width", "height", "valid", "yaw", "arc_length", "speed_limit"]:
         return 1
     elif feature_key == "state":
         return max(dict_mapping["state"])
@@ -119,6 +119,10 @@ def normalize_by_feature(data: jax.Array, feature_key: str, meters: int, dict_ma
         data = data / MAX_SPEED  # m/s
     elif feature_key in ["length", "width", "height"]:
         data = data / meters  # m
+    elif feature_key == "speed_limit":
+        # Normalize speed limit (typically 0-30 m/s)
+        data = jnp.clip(data, min=0, max=MAX_SPEED)
+        data = data / MAX_SPEED
     elif feature_key in ["valid", "yaw", "arc_length", "dir_xy", "ids"]:
         pass
     else:
