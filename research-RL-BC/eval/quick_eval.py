@@ -30,13 +30,37 @@ def print_model_info(config_path):
         with open(config_path, 'r') as f:
             config = yaml.safe_load(f)
             
-        # Extract important parameters
-        algo_name = config.get("algorithm", {}).get("name", "N/A")
-        encoder_type = config.get("network", {}).get("encoder", {}).get("_target_", "N/A").split('.')[-1]
-        policy_type = config.get("algorithm", {}).get("network", {}).get("policy", {}).get("_target_", "N/A").split('.')[-1]
+        # Helper to find a value in nested dict
+        def find_nested(d, keys, default="N/A"):
+            for k in keys:
+                if isinstance(d, dict) and k in d:
+                    d = d[k]
+                else:
+                    return default
+            return d
+
+        algo_name = config.get("algorithm", {}).get("name", config.get("name", "N/A"))
+        
+        # Try different ways to find encoder/policy types
+        encoder_raw = config.get("network", {}).get("encoder", {})
+        if isinstance(encoder_raw, dict):
+            encoder_type = encoder_raw.get("_target_", "N/A").split('.')[-1]
+            if encoder_type == "N/A":
+                encoder_type = encoder_raw.get("type", "N/A")
+        else:
+            encoder_type = str(encoder_raw)
+
+        policy_raw = config.get("algorithm", {}).get("network", {}).get("policy", {})
+        if isinstance(policy_raw, dict):
+            policy_type = policy_raw.get("_target_", "N/A").split('.')[-1]
+            if policy_type == "N/A":
+                policy_type = policy_raw.get("type", "MLP") # Default to MLP for SAC/BC
+        else:
+            policy_type = str(policy_raw)
+
         obs_type = config.get("observation_type", "N/A")
         term_keys = config.get("termination_keys", [])
-        learning_rate = config.get("algorithm", {}).get("learning_rate", "N/A")
+        learning_rate = config.get("algorithm", {}).get("learning_rate", config.get("learning_rate", "N/A"))
         
         print(f"{'Algorithm:':<20} {algo_name}")
         print(f"{'Encoder:':<20} {encoder_type}")
@@ -69,15 +93,28 @@ def main():
     # 2. Setup Evaluation
     print(f"-> Setting up evaluation for model: {args.model_id}")
     
-    # Flatten nested config for compatibility (as seen in offline_extraction.py)
+    # Flatten nested config for compatibility
+    # Try multiple locations for these fields as Hydra configs varies
     if "algorithm" in config and "network" in config["algorithm"]:
-        config["policy"] = config["algorithm"]["network"].get("policy", {})
-        config["value"] = config["algorithm"]["network"].get("value", {})
-        config["action_distribution"] = config["algorithm"]["network"].get("action_distribution", "gaussian")
+        nw = config["algorithm"]["network"]
+        config["policy"] = nw.get("policy", config.get("policy", {}))
+        config["value"] = nw.get("value", config.get("value", {}))
+        
+        # Robust action_distribution extraction
+        ad = nw.get("action_distribution", config.get("action_distribution", "gaussian"))
+        if isinstance(ad, dict):
+            # If it's a dict, try to find a string that looks like 'gaussian' or 'beta'
+            ad_str = str(ad).lower()
+            if "beta" in ad_str: config["action_distribution"] = "beta"
+            else: config["action_distribution"] = "gaussian"
+        else:
+            config["action_distribution"] = ad
     
     if "network" in config and "encoder" in config["network"]:
         config["encoder"] = config["network"]["encoder"]
-    
+    elif "encoder" not in config:
+        config["encoder"] = {"_target_": "vmax.agents.networks.encoders.MLPEncoder"}
+
     config["unflatten_config"] = config.get("observation_config", {})
     
     termination_keys = config["termination_keys"]
