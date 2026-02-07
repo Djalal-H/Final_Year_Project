@@ -416,23 +416,7 @@ class VecFeaturesExtractor(extractor.AbstractFeaturesExtractor):
         roadgraph_points = self._reduce_and_filter_roadgraph_points(sdc_obs.roadgraph_static_points)
 
         for key in self._roadgraph_features_key:
-            # Special handling for speed_limit which needs to be computed
-            if key == "speed_limit":
-                # Infer speed limit from lane type
-                # Lane types: 1 = freeway (70 mph), 2 = surface street (45 mph)
-                # Convert to m/s: mph / 2.237
-                lane_type = roadgraph_points.types
-                # Default to surface street speed (45 mph = ~20 m/s)
-                speed_limit_mph = jnp.where(
-                    (lane_type == datatypes.MapElementIds.LANE_FREEWAY) | 
-                    (lane_type == datatypes.MapElementIds.LANE_SURFACE_STREET),
-                    jnp.where(lane_type == datatypes.MapElementIds.LANE_FREEWAY, 70.0, 45.0),
-                    45.0  # default
-                )
-                feature = speed_limit_mph / 2.237  # Convert to m/s
-            else:
-                feature = getattr(roadgraph_points, key)
-            
+            feature = getattr(roadgraph_points, key)
             feature = extractor.normalize_by_feature(feature, key, self._max_meters, self._dict_mapping)
 
             if feature.ndim == 1:
