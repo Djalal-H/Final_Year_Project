@@ -1,6 +1,7 @@
 import os
 import argparse
 import jax
+import jax.numpy as jnp
 import numpy as np
 import yaml
 from functools import partial
@@ -143,14 +144,14 @@ def main():
     policy = utils.load_model(env, config["algorithm"]["name"], config, model_path)
     step_fn = partial(pipeline.policy_step, env=env, policy_fn=policy)
     
-    # 3. Run Quick Evaluation
+    # 3. Run Quick Evaluation (matching xai_eval.py approach)
     print(f"-> Running evaluation on {args.num_scenarios} scenarios...")
     
     data_generator = make_data_generator(
         path=datasets.get_dataset(args.dataset_path),
         max_num_objects=args.max_num_objects,
         include_sdc_paths=True,
-        batch_dims=(1,),  # Sequential for quick eval
+        batch_dims=(1, 1),  # Match xai_eval.py for proper batching
         seed=0,
         repeat=1,
     )
@@ -164,16 +165,38 @@ def main():
     for i, scenario in enumerate(tqdm(data_generator, total=args.num_scenarios, desc="Evaluating")):
         if i >= args.num_scenarios:
             break
-            
-        rng_key, scenario_key = jax.random.split(rng_key)
         
-        # Run scenario - scenario_key should be a single key, not an array
-        episode_metrics, steps_done = utils.run_scenario_jit(
-            scenario, 
-            scenario_key, 
-            step_fn=jitted_step_fn, 
-            reset_fn=jitted_reset
-        )
+        # Squeeze batch dimension (matching xai_eval.py)
+        scenario = jax.tree_map(lambda x: x.squeeze(0), scenario)
+        
+        rng_key, reset_key = jax.random.split(rng_key)
+        # Split reset_key for batch size 1 (matching xai_eval.py)
+        reset_key = jax.random.split(reset_key, 1)
+        
+        # Reset environment
+        env_transition = jitted_reset(scenario, reset_key)
+        
+        # Initialize episode metrics
+        episode_metrics = {}
+        for key, value in env_transition.metrics.items():
+            episode_metrics[key] = jnp.full((80,), -2.0, dtype=jnp.float32)
+        
+        # Simulation loop
+        done = False
+        steps = 0
+        while not done and steps < 80:
+            rng_key, step_key = jax.random.split(rng_key)
+            step_key = jax.random.split(step_key, 1)
+            env_transition, _ = jitted_step_fn(env_transition, key=step_key)
+            
+            # Collect metrics
+            for key, value in env_transition.metrics.items():
+                episode_metrics[key] = episode_metrics[key].at[steps].set(value[0])
+            
+            done = bool(jax.device_get(env_transition.done)[0])
+            steps += 1
+        
+        steps_done = jnp.array([[steps]])
         
         # Aggregate metrics
         eval_metrics = utils.append_episode_metrics(
