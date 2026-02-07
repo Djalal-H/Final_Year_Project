@@ -443,20 +443,13 @@ class VecFeaturesExtractor(extractor.AbstractFeaturesExtractor):
 
             feature = extractor.normalize_by_feature(feature, key, self._max_meters, self._dict_mapping)
 
-            if feature.ndim == 2:
-                feature = jnp.expand_dims(feature, axis=-1)
-
-            setattr(roadgraph_features, key, feature)
-
-        return roadgraph_features
-            feature = extractor.normalize_by_feature(feature, key, self._max_meters, self._dict_mapping)
-
             if feature.ndim == 1:
                 feature = jnp.expand_dims(feature, axis=-1)
 
             setattr(roadgraph_features, key, feature)
 
-        return roadgraph_features   
+        return roadgraph_features
+   
 
     def _build_traffic_lights_features(self, sdc_obs: datatypes.Observation) -> features.TrafficLightFeatures:
         """Create traffic light features from the SDC observation.
