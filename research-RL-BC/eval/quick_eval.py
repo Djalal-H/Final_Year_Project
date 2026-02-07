@@ -2,6 +2,7 @@ import os
 import argparse
 import jax
 import numpy as np
+import jax.numpy as jnp
 import yaml
 from functools import partial
 from tqdm import tqdm
