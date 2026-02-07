@@ -69,12 +69,16 @@ def main():
     # 2. Setup Evaluation
     print(f"-> Setting up evaluation for model: {args.model_id}")
     
-    # Prepare config for evaluation setup (mimicking utils.setup_evaluation)
-    config["encoder"] = config["network"]["encoder"]
-    config["policy"] = config["algorithm"]["network"]["policy"]
-    config["value"] = config["algorithm"]["network"]["value"] if "value" in config["algorithm"]["network"] else None
-    config["unflatten_config"] = config["observation_config"]
-    config["action_distribution"] = config["algorithm"]["network"]["action_distribution"]
+    # Flatten nested config for compatibility (as seen in offline_extraction.py)
+    if "algorithm" in config and "network" in config["algorithm"]:
+        config["policy"] = config["algorithm"]["network"].get("policy", {})
+        config["value"] = config["algorithm"]["network"].get("value", {})
+        config["action_distribution"] = config["algorithm"]["network"].get("action_distribution", "gaussian")
+    
+    if "network" in config and "encoder" in config["network"]:
+        config["encoder"] = config["network"]["encoder"]
+    
+    config["unflatten_config"] = config.get("observation_config", {})
     
     termination_keys = config["termination_keys"]
     
