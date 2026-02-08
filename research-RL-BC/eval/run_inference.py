@@ -7,6 +7,8 @@ if VMAX_REPO not in sys.path:
     sys.path.insert(0, VMAX_REPO)
 
 import yaml, jax, flax
+import numpy as np
+from tqdm import tqdm
 from functools import partial
 from waymax import dynamics
 from vmax.simulator import make_env_for_evaluation, make_data_generator
@@ -17,9 +19,10 @@ from vmax.agents import pipeline
 import argparse
 
 # === Config ===
-parser = argparse.ArgumentParser(description="Quick inference: load a model, run one scenario, print metrics.")
+parser = argparse.ArgumentParser(description="Quick inference: load a model, run scenarios, print metrics.")
 parser.add_argument("--model", type=str, default="runs_rlc/womd_sac_road_perceiver_minimal_42", help="Path to the model directory")
 parser.add_argument("--dataset", type=str, default="data/training.tfrecord", help="Path to the dataset")
+parser.add_argument("--num_scenarios", "-n", type=int, default=1, help="Number of scenarios to run")
 args = parser.parse_args()
 
 MODEL_DIR = args.model
@@ -52,6 +55,30 @@ if enc_type in ENCODER_REMAP:
 obs_type = OBS_TYPE_REMAP.get(config["observation_type"], config["observation_type"])
 if obs_type != config["observation_type"]:
     print(f"[FIX] Obs type: {config['observation_type']} -> {obs_type}")
+
+# === Print Model Info ===
+print("\n" + "="*50)
+print("      MODEL CONFIGURATION")
+print("="*50)
+algo_name = config.get("algorithm", {}).get("name", "N/A")
+print(f"Algorithm:       {algo_name}")
+print(f"Learning Rate:   {config.get('algorithm', {}).get('learning_rate', 'N/A')}")
+print(f"Observation:     {config.get('observation_type', 'N/A')}")
+policy_layers = config.get("algorithm", {}).get("network", {}).get("policy", {}).get("layer_sizes", "N/A")
+print(f"Policy Layers:   {policy_layers}")
+
+encoder_cfg = config.get("network", {}).get("encoder", {})
+print("-" * 50)
+print("      ENCODER INFO")
+print(f"Type:            {encoder_cfg.get('type', 'N/A')}")
+if encoder_cfg.get("type") in ["lq", "perceiver"]:
+    print(f"Depth:           {encoder_cfg.get('encoder_depth', 'N/A')}")
+    print(f"Num Latents:     {encoder_cfg.get('num_latents', 'N/A')}")
+    print(f"Latent Heads:    {encoder_cfg.get('latent_num_heads', 'N/A')}")
+    print(f"Dk:              {encoder_cfg.get('dk', 'N/A')}")
+elif encoder_cfg.get("type") == "mlp":
+    print(f"Layer Sizes:     {encoder_cfg.get('layer_sizes', 'N/A')}")
+print("="*50 + "\n")
 
 # 2. Build eval config
 eval_config = dict(config)
@@ -95,7 +122,7 @@ for old_key, new_key in PARAM_KEY_REMAP.items():
 
 policy_fn = make_policy(policy_params, deterministic=True)
 
-# 6. Load data & run episode
+# 6. Load data & run episodes
 data_gen = make_data_generator(
     path=DATA_PATH,
     max_num_objects=config.get("max_num_objects", 64),
@@ -104,20 +131,48 @@ data_gen = make_data_generator(
     seed=42,
     repeat=1,
 )
-scenario = next(iter(data_gen))
 
 rng_key = jax.random.PRNGKey(0)
-rng_key, reset_key = jax.random.split(rng_key)
-env_transition = jax.jit(env.reset)(scenario, jax.random.split(reset_key, 1))
-
 step_fn = partial(pipeline.policy_step, env=env, policy_fn=policy_fn)
-steps = 0
-while not bool(env_transition.done):
-    rng_key, step_key = jax.random.split(rng_key)
-    env_transition, transition = step_fn(env_transition, key=jax.random.split(step_key, 1))
-    steps += 1
+jitted_step_fn = jax.jit(step_fn)
+jitted_reset = jax.jit(env.reset)
 
-print(f"\nEpisode done in {steps} steps")
-print("Metrics:")
-for k, v in env_transition.metrics.items():
-    print(f"  {k}: {float(v[0]):.4f}")
+all_metrics = []
+
+print(f"Running inference on {args.num_scenarios} scenarios...")
+for i, scenario in enumerate(tqdm(data_gen, total=args.num_scenarios)):
+    if i >= args.num_scenarios:
+        break
+        
+    rng_key, reset_key = jax.random.split(rng_key)
+    env_transition = jitted_reset(scenario, jax.random.split(reset_key, 1))
+
+    steps = 0
+    while not bool(env_transition.done):
+        rng_key, step_key = jax.random.split(rng_key)
+        env_transition, transition = jitted_step_fn(env_transition, key=jax.random.split(step_key, 1))
+        steps += 1
+    
+    # Extract metrics for this scenario
+    metrics = {k: float(v[0]) for k, v in env_transition.metrics.items()}
+    metrics['steps'] = steps
+    all_metrics.append(metrics)
+
+# 7. Print aggregate results
+print("\n" + "="*50)
+print("            EVALUATION SUMMARY")
+print("="*50)
+print(f"Scenarios:       {len(all_metrics)}")
+
+# Calculate averages
+avg_metrics = {}
+for k in all_metrics[0].keys():
+    values = [m[k] for m in all_metrics]
+    avg_metrics[k] = np.mean(values)
+
+for k, v in avg_metrics.items():
+    if k == 'steps':
+        print(f"Avg Steps:       {v:.2f}")
+    else:
+        print(f"Mean {k:11}: {v:.4f}")
+print("="*50 + "\n")
