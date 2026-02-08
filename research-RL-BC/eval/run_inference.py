@@ -12,8 +12,7 @@ from tqdm import tqdm
 from functools import partial
 from waymax import dynamics
 from vmax.simulator import make_env_for_evaluation, make_data_generator
-from vmax.scripts.evaluate.utils import load_params, get_algorithm_modules
-from vmax.simulator.metrics.aggregators import nuplan_aggregate_score, vmax_aggregate_score
+from vmax.scripts.evaluate import utils
 from vmax.agents import pipeline
 
 import argparse
@@ -100,7 +99,7 @@ env = make_env_for_evaluation(
 )
 
 # 4. Build network
-make_inference_fn, make_networks = get_algorithm_modules(algo_name)
+make_inference_fn, build_network = utils.get_algorithm_modules(algo_name)
 
 # For bc_sac, it needs two learning rates, others need one.
 extra_kwargs = {}
@@ -110,7 +109,7 @@ if algo_name.lower() == "bc_sac":
 else:
     extra_kwargs["learning_rate"] = eval_config["algorithm"]["learning_rate"]
 
-network = make_networks(
+network = build_network(
     observation_size=env.observation_spec(),
     action_size=env.action_spec().data.shape[0],
     unflatten_fn=env.get_wrapper_attr("features_extractor").unflatten_features,
@@ -120,7 +119,7 @@ network = make_networks(
 make_policy = make_inference_fn(network)
 
 # 5. Load params & fix keys
-training_state = load_params(f"{MODEL_DIR}/model/model_final.pkl")
+training_state = utils.load_params(f"{MODEL_DIR}/model/model_final.pkl")
 
 # Extract policy params based on algorithm structure
 if hasattr(training_state, "params") and hasattr(training_state.params, "policy"):
@@ -155,59 +154,50 @@ step_fn = partial(pipeline.policy_step, env=env, policy_fn=policy_fn)
 jitted_step_fn = jax.jit(step_fn)
 jitted_reset = jax.jit(env.reset)
 
-all_metrics = []
+# Dictionary to accumulate all metrics across scenarios
+eval_metrics = {"episode_length": [], "accuracy": []}
+termination_keys = config["termination_keys"]
 
 print(f"Running inference on {args.num_scenarios} scenarios...")
 for i, scenario in enumerate(tqdm(data_gen, total=args.num_scenarios)):
     if i >= args.num_scenarios:
         break
         
-    rng_key, reset_key = jax.random.split(rng_key)
-    env_transition = jitted_reset(scenario, jax.random.split(reset_key, 1))
-
-    steps = 0
-    while not bool(env_transition.done):
-        rng_key, step_key = jax.random.split(rng_key)
-        env_transition, transition = jitted_step_fn(env_transition, key=jax.random.split(step_key, 1))
-        steps += 1
+    rng_key, scenario_key = jax.random.split(rng_key)
     
-    # Extract metrics for this scenario
-    final_metrics = {k: float(v[0]) for k, v in env_transition.metrics.items()}
+    # Run scenario using utility function (JIT loop)
+    # This collects metrics for every step into an array
+    episode_metrics, steps_done = utils.run_scenario_jit(
+        scenario, 
+        scenario_key, 
+        step_fn=jitted_step_fn, 
+        reset_fn=jitted_reset
+    )
     
-    # Calculate accuracy: 1 if all termination keys are 0
-    is_failed = any(final_metrics.get(k, 0) > 0 for k in config["termination_keys"])
-    final_metrics['accuracy'] = 0.0 if is_failed else 1.0
-    
-    # Calculate aggregate scores
-    final_metrics['vmax_score'] = vmax_aggregate_score(final_metrics)
-    final_metrics['nuplan_score'] = nuplan_aggregate_score(final_metrics)
-    
-    final_metrics['steps'] = steps
-    all_metrics.append(final_metrics)
+    # Process and aggregate metrics for this scenario
+    # This applies operands (mean, max, etc.) and calculates scores
+    eval_metrics = utils.append_episode_metrics(
+        steps_done,
+        eval_metrics,
+        episode_metrics,
+        termination_keys,
+        batch_size=1
+    )
 
 # 7. Print aggregate results
 print("\n" + "="*50)
 print("            EVALUATION SUMMARY")
 print("="*50)
-print(f"Scenarios:       {len(all_metrics)}")
+print(f"Scenarios:       {len(eval_metrics['accuracy'])}")
 
-# Calculate averages
-avg_metrics = {}
-for k in all_metrics[0].keys():
-    values = [m[k] for m in all_metrics]
-    avg_metrics[k] = np.mean(values)
-
-for k, v in avg_metrics.items():
-    if k == 'steps':
-        print(f"Avg Steps:       {v:.2f}")
-    elif k in ['accuracy', 'vmax_score', 'nuplan_score']:
-        # Print these first or specially
+# Calculate and print means for all metrics
+for k, v in eval_metrics.items():
+    if k in ['accuracy', 'vmax_aggregate_score', 'nuplan_aggregate_score']:
         continue
-    else:
-        print(f"Mean {k:11}: {v:.4f}")
+    print(f"Mean {k:25}: {np.mean(v):.4f}")
 
 print("-" * 50)
-print(f"MEAN ACCURACY:   {avg_metrics.get('accuracy', 0):.4f}")
-print(f"V-MAX SCORE:     {avg_metrics.get('vmax_score', 0):.4f}")
-print(f"NUPLAN SCORE:    {avg_metrics.get('nuplan_score', 0):.4f}")
+print(f"MEAN ACCURACY:             {np.mean(eval_metrics['accuracy']):.4f}")
+print(f"V-MAX AGGREGATE SCORE:     {np.mean(eval_metrics['vmax_aggregate_score']):.4f}")
+print(f"NUPLAN AGGREGATE SCORE:    {np.mean(eval_metrics['nuplan_aggregate_score']):.4f}")
 print("="*50 + "\n")
