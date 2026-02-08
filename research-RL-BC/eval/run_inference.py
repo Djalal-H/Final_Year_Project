@@ -14,9 +14,16 @@ from vmax.agents.learning.reinforcement.sac.sac_factory import make_inference_fn
 from vmax.scripts.evaluate.utils import load_params
 from vmax.agents import pipeline
 
+import argparse
+
 # === Config ===
-MODEL_DIR = "runs_rlc/womd_sac_road_perceiver_minimal_42"
-DATA_PATH = "data/training.tfrecord"
+parser = argparse.ArgumentParser(description="Quick inference: load a model, run one scenario, print metrics.")
+parser.add_argument("--model", type=str, default="runs_rlc/womd_sac_road_perceiver_minimal_42", help="Path to the model directory")
+parser.add_argument("--dataset", type=str, default="data/training.tfrecord", help="Path to the dataset")
+args = parser.parse_args()
+
+MODEL_DIR = args.model
+DATA_PATH = args.dataset
 
 # === Remapping tables ===
 ENCODER_REMAP = {"perceiver": "lq", "mgail": "lqh"}
