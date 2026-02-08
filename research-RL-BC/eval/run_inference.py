@@ -66,6 +66,8 @@ algo_name = config.get("algorithm", {}).get("name", "N/A")
 print(f"Algorithm:       {algo_name}")
 print(f"Learning Rate:   {config.get('algorithm', {}).get('learning_rate', 'N/A')}")
 print(f"Observation:     {config.get('observation_type', 'N/A')}")
+num_closest_objects = config.get("observation_config", {}).get("objects", {}).get("num_closest_objects", "N/A")
+print(f"Num Closest Objects:     {num_closest_objects}")
 policy_layers = config.get("algorithm", {}).get("network", {}).get("policy", {}).get("layer_sizes", "N/A")
 print(f"Policy Layers:   {policy_layers}")
 
