@@ -12,8 +12,7 @@ from tqdm import tqdm
 from functools import partial
 from waymax import dynamics
 from vmax.simulator import make_env_for_evaluation, make_data_generator
-from vmax.agents.learning.reinforcement.sac.sac_factory import make_inference_fn, make_networks
-from vmax.scripts.evaluate.utils import load_params
+from vmax.scripts.evaluate.utils import load_params, get_algorithm_modules
 from vmax.agents import pipeline
 
 import argparse
@@ -82,11 +81,11 @@ print("="*50 + "\n")
 
 # 2. Build eval config
 eval_config = dict(config)
-eval_config["encoder"] = config["network"]["encoder"]
-eval_config["policy"] = config["algorithm"]["network"]["policy"]
-eval_config["value"] = config["algorithm"]["network"]["value"]
-eval_config["unflatten_config"] = config["observation_config"]
-eval_config["action_distribution"] = config["algorithm"]["network"]["action_distribution"]
+eval_config["encoder"] = config.get("network", {}).get("encoder", {})
+eval_config["policy"] = config.get("algorithm", {}).get("network", {}).get("policy", {})
+eval_config["value"] = config.get("algorithm", {}).get("network", {}).get("value", {})
+eval_config["unflatten_config"] = config.get("observation_config", {})
+eval_config["action_distribution"] = config.get("algorithm", {}).get("network", {}).get("action_distribution", "gaussian")
 
 # 3. Create environment
 env = make_env_for_evaluation(
@@ -100,18 +99,36 @@ env = make_env_for_evaluation(
 )
 
 # 4. Build network
+make_inference_fn, make_networks = get_algorithm_modules(algo_name)
+
+# For bc_sac, it needs two learning rates, others need one.
+extra_kwargs = {}
+if algo_name.lower() == "bc_sac":
+    extra_kwargs["rl_learning_rate"] = eval_config["algorithm"]["rl_learning_rate"]
+    extra_kwargs["imitation_learning_rate"] = eval_config["algorithm"]["imitation_learning_rate"]
+else:
+    extra_kwargs["learning_rate"] = eval_config["algorithm"]["learning_rate"]
+
 network = make_networks(
     observation_size=env.observation_spec(),
     action_size=env.action_spec().data.shape[0],
     unflatten_fn=env.get_wrapper_attr("features_extractor").unflatten_features,
-    learning_rate=eval_config["algorithm"]["learning_rate"],
     network_config=eval_config,
+    **extra_kwargs
 )
 make_policy = make_inference_fn(network)
 
 # 5. Load params & fix keys
 training_state = load_params(f"{MODEL_DIR}/model/model_final.pkl")
-policy_params = training_state.policy
+
+# Extract policy params based on algorithm structure
+if hasattr(training_state, "params") and hasattr(training_state.params, "policy"):
+    policy_params = training_state.params.policy
+elif hasattr(training_state, "policy"):
+    policy_params = training_state.policy
+else:
+    # Fallback/Older versions
+    policy_params = training_state
 
 for old_key, new_key in PARAM_KEY_REMAP.items():
     for path, _ in jax.tree_util.tree_leaves_with_path(policy_params):
