@@ -163,29 +163,28 @@ for i, scenario in enumerate(tqdm(data_gen, total=args.num_scenarios)):
     if i >= args.num_scenarios:
         break
         
-    rng_key, scenario_key = jax.random.split(rng_key)
+    rng_key, reset_key = jax.random.split(rng_key)
+    env_transition = jitted_reset(scenario, jax.random.split(reset_key, 1))
+
+    steps = 0
+    while not bool(env_transition.done):
+        rng_key, step_key = jax.random.split(rng_key)
+        env_transition, transition = jitted_step_fn(env_transition, key=jax.random.split(step_key, 1))
+        steps += 1
     
-    # Run scenario using utility function (JIT loop)
-    # This collects metrics for every step into an array
-    episode_metrics, steps_done = utils.run_scenario_jit(
-        scenario, 
-        scenario_key, 
-        step_fn=jitted_step_fn, 
-        reset_fn=jitted_reset
-    )
+    # Extract metrics for this scenario
+    final_metrics = {k: float(v[0]) for k, v in env_transition.metrics.items()}
     
-    # Process and aggregate metrics for this scenario
-    # Ensure steps_done is 2D (batch, 1) to avoid IndexError in utils.append_episode_metrics
-    if steps_done.ndim == 1:
-        steps_done = steps_done[:, np.newaxis]
-        
-    eval_metrics = utils.append_episode_metrics(
-        steps_done,
-        eval_metrics,
-        episode_metrics,
-        termination_keys,
-        batch_size=1
-    )
+    # Calculate accuracy: 1 if all termination keys are 0
+    is_failed = any(final_metrics.get(k, 0) > 0 for k in config["termination_keys"])
+    final_metrics['accuracy'] = 0.0 if is_failed else 1.0
+    
+    # Calculate aggregate scores
+    final_metrics['vmax_score'] = vmax_aggregate_score(final_metrics)
+    final_metrics['nuplan_score'] = nuplan_aggregate_score(final_metrics)
+    
+    final_metrics['steps'] = steps
+    all_metrics.append(final_metrics)
 
 # 7. Print aggregate results
 print("\n" + "="*55)
