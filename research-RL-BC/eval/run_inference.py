@@ -188,7 +188,7 @@ for i, scenario in enumerate(tqdm(data_gen, total=args.num_scenarios)):
     )
 
 # 7. Print aggregate results
-print("\n" + "="*50)
+print("\n" + "="*55)
 print("            EVALUATION SUMMARY")
 print("="*50)
 print(f"Scenarios:       {len(eval_metrics['accuracy'])}")
