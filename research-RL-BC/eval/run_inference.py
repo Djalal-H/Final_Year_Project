@@ -12,7 +12,7 @@ from tqdm import tqdm
 from functools import partial
 from waymax import dynamics
 from vmax.simulator import make_env_for_evaluation, make_data_generator
-from vmax.scripts.evaluate.utils import load_params, get_algorithm_modules, run_scenario_jit, append_episode_metrics
+from vmax.scripts.evaluate.utils import load_params, get_algorithm_modules
 from vmax.agents import pipeline
 
 import argparse
@@ -154,59 +154,42 @@ step_fn = partial(pipeline.policy_step, env=env, policy_fn=policy_fn)
 jitted_step_fn = jax.jit(step_fn)
 jitted_reset = jax.jit(env.reset)
 
-eval_metrics = {"episode_length": [], "accuracy": []}
-term_keys = config.get("termination_keys", ["overlap", "offroad"])
+all_metrics = []
 
 print(f"Running inference on {args.num_scenarios} scenarios...")
 for i, scenario in enumerate(tqdm(data_gen, total=args.num_scenarios)):
     if i >= args.num_scenarios:
         break
         
-    rng_key, scenario_key = jax.random.split(rng_key)
+    rng_key, reset_key = jax.random.split(rng_key)
+    env_transition = jitted_reset(scenario, jax.random.split(reset_key, 1))
+
+    steps = 0
+    while not bool(env_transition.done):
+        rng_key, step_key = jax.random.split(rng_key)
+        env_transition, transition = jitted_step_fn(env_transition, key=jax.random.split(step_key, 1))
+        steps += 1
     
-    # Run scenario using JIT-optimized loop
-    episode_metrics, steps_done = run_scenario_jit(
-        scenario, 
-        scenario_key, 
-        step_fn=jitted_step_fn, 
-        reset_fn=jitted_reset
-    )
-    
-    # Aggregate metrics
-    eval_metrics = append_episode_metrics(
-        steps_done,
-        eval_metrics,
-        episode_metrics,
-        term_keys,
-        batch_size=1
-    )
+    # Extract metrics for this scenario
+    metrics = {k: float(v[0]) for k, v in env_transition.metrics.items()}
+    metrics['steps'] = steps
+    all_metrics.append(metrics)
 
 # 7. Print aggregate results
 print("\n" + "="*50)
 print("            EVALUATION SUMMARY")
 print("="*50)
-print(f"Scenarios:       {len(eval_metrics['accuracy'])}")
+print(f"Scenarios:       {len(all_metrics)}")
 
 # Calculate averages
 avg_metrics = {}
-for k, v in eval_metrics.items():
-    if isinstance(v, list) and len(v) > 0:
-        avg_metrics[k] = np.mean(v)
+for k in all_metrics[0].keys():
+    values = [m[k] for m in all_metrics]
+    avg_metrics[k] = np.mean(values)
 
-# Prioritize certain metrics for display
-important_keys = ["accuracy", "vmax_aggregate_score", "episode_length", "at_fault_collision", "offroad", "run_red_light"]
-for k in important_keys:
-    if k in avg_metrics:
-        val = avg_metrics[k]
-        name = k.replace("_", " ").title()
-        if "Accuracy" in name or "Score" in name:
-            print(f"{name+':':<20} {val:.4f}")
-        else:
-            print(f"{name+':':<20} {val:.2f}")
-
-print("-" * 50)
-# Print remaining metrics
-for k, v in sorted(avg_metrics.items()):
-    if k not in important_keys:
-        print(f"Mean {k:25}: {v:.4f}")
+for k, v in avg_metrics.items():
+    if k == 'steps':
+        print(f"Avg Steps:       {v:.2f}")
+    else:
+        print(f"Mean {k:11}: {v:.4f}")
 print("="*50 + "\n")
