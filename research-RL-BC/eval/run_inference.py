@@ -13,6 +13,7 @@ from functools import partial
 from waymax import dynamics
 from vmax.simulator import make_env_for_evaluation, make_data_generator
 from vmax.scripts.evaluate.utils import load_params, get_algorithm_modules
+from vmax.simulator.metrics.aggregators import nuplan_aggregate_score, vmax_aggregate_score
 from vmax.agents import pipeline
 
 import argparse
@@ -171,9 +172,18 @@ for i, scenario in enumerate(tqdm(data_gen, total=args.num_scenarios)):
         steps += 1
     
     # Extract metrics for this scenario
-    metrics = {k: float(v[0]) for k, v in env_transition.metrics.items()}
-    metrics['steps'] = steps
-    all_metrics.append(metrics)
+    final_metrics = {k: float(v[0]) for k, v in env_transition.metrics.items()}
+    
+    # Calculate accuracy: 1 if all termination keys are 0
+    is_failed = any(final_metrics.get(k, 0) > 0 for k in config["termination_keys"])
+    final_metrics['accuracy'] = 0.0 if is_failed else 1.0
+    
+    # Calculate aggregate scores
+    final_metrics['vmax_score'] = vmax_aggregate_score(final_metrics)
+    final_metrics['nuplan_score'] = nuplan_aggregate_score(final_metrics)
+    
+    final_metrics['steps'] = steps
+    all_metrics.append(final_metrics)
 
 # 7. Print aggregate results
 print("\n" + "="*50)
@@ -190,6 +200,14 @@ for k in all_metrics[0].keys():
 for k, v in avg_metrics.items():
     if k == 'steps':
         print(f"Avg Steps:       {v:.2f}")
+    elif k in ['accuracy', 'vmax_score', 'nuplan_score']:
+        # Print these first or specially
+        continue
     else:
         print(f"Mean {k:11}: {v:.4f}")
+
+print("-" * 50)
+print(f"MEAN ACCURACY:   {avg_metrics.get('accuracy', 0):.4f}")
+print(f"V-MAX SCORE:     {avg_metrics.get('vmax_score', 0):.4f}")
+print(f"NUPLAN SCORE:    {avg_metrics.get('nuplan_score', 0):.4f}")
 print("="*50 + "\n")
