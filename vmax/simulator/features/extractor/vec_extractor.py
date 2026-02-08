@@ -24,7 +24,7 @@ FEATURE_MAP = {
     "types": ("types",),
     "state": ("state",),
     "object_types": ("object_types",),
-    "speed_limit": ("speed_limit",),
+    "object_types": ("object_types",),
 }
 
 
@@ -434,12 +434,7 @@ class VecFeaturesExtractor(extractor.AbstractFeaturesExtractor):
         roadgraph_points = self._reduce_and_filter_roadgraph_points(sdc_obs.roadgraph_static_points)
 
         for key in self._roadgraph_features_key:
-            if key == "speed_limit":
-                # Model expects this, but Waymax doesn't provide it
-                # Use constant default (13.4 m/s ≈ 30 mph)
-                feature = jnp.full((roadgraph_points.xy.shape[0],), 13.4, dtype=jnp.float32)
-            else:
-                feature = getattr(roadgraph_points, key)
+            feature = getattr(roadgraph_points, key)
 
             feature = extractor.normalize_by_feature(feature, key, self._max_meters, self._dict_mapping)
 
