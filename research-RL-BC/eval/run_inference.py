@@ -2,9 +2,11 @@
 import os, sys
 os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
 
-VMAX_REPO = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vmax")
-if VMAX_REPO not in sys.path:
-    sys.path.insert(0, VMAX_REPO)
+# Correct the Python path to point to the repository root
+# Script is in research-RL-BC/eval/, so we go up 3 levels
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+if REPO_ROOT not in sys.path:
+    sys.path.insert(0, REPO_ROOT)
 
 import yaml, jax, flax
 import numpy as np
@@ -12,6 +14,7 @@ from tqdm import tqdm
 from functools import partial
 from waymax import dynamics
 from vmax.simulator import make_env_for_evaluation, make_data_generator
+from vmax.simulator.metrics.aggregators import vmax_aggregate_score, nuplan_aggregate_score
 from vmax.scripts.evaluate import utils
 from vmax.agents import pipeline
 
@@ -163,31 +166,32 @@ for i, scenario in enumerate(tqdm(data_gen, total=args.num_scenarios)):
     if i >= args.num_scenarios:
         break
         
-    rng_key, reset_key = jax.random.split(rng_key)
-    env_transition = jitted_reset(scenario, jax.random.split(reset_key, 1))
-
-    steps = 0
-    while not bool(env_transition.done):
-        rng_key, step_key = jax.random.split(rng_key)
-        env_transition, transition = jitted_step_fn(env_transition, key=jax.random.split(step_key, 1))
-        steps += 1
+    rng_key, scenario_key = jax.random.split(rng_key)
     
-    # Extract metrics for this scenario
-    final_metrics = {k: float(v[0]) for k, v in env_transition.metrics.items()}
+    # Run scenario using utility function (JIT loop)
+    # This collects metrics for every step into an array
+    episode_metrics, steps_done = utils.run_scenario_jit(
+        scenario, 
+        scenario_key, 
+        step_fn=jitted_step_fn, 
+        reset_fn=jitted_reset
+    )
     
-    # Calculate accuracy: 1 if all termination keys are 0
-    is_failed = any(final_metrics.get(k, 0) > 0 for k in config["termination_keys"])
-    final_metrics['accuracy'] = 0.0 if is_failed else 1.0
-    
-    # Calculate aggregate scores
-    final_metrics['vmax_score'] = vmax_aggregate_score(final_metrics)
-    final_metrics['nuplan_score'] = nuplan_aggregate_score(final_metrics)
-    
-    final_metrics['steps'] = steps
-    all_metrics.append(final_metrics)
+    # Process and aggregate metrics for this scenario
+    # Ensure steps_done is 2D (batch, 1) to avoid IndexError in utils.append_episode_metrics
+    if steps_done.ndim == 1:
+        steps_done = steps_done[:, np.newaxis]
+        
+    eval_metrics = utils.append_episode_metrics(
+        steps_done,
+        eval_metrics,
+        episode_metrics,
+        termination_keys,
+        batch_size=1
+    )
 
 # 7. Print aggregate results
-print("\n" + "="*55)
+print("\n" + "="*50)
 print("            EVALUATION SUMMARY")
 print("="*50)
 print(f"Scenarios:       {len(eval_metrics['accuracy'])}")
