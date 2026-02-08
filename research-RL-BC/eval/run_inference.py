@@ -178,9 +178,13 @@ for i, scenario in enumerate(tqdm(data_gen, total=args.num_scenarios)):
     )
     
     # Process and aggregate metrics for this scenario
-    # Ensure steps_done is 2D (batch, 1) to avoid IndexError in utils.append_episode_metrics
+    # Ensure steps_done and episode_metrics have batch dimensions (batch, ...)
     if steps_done.ndim == 1:
         steps_done = steps_done[:, np.newaxis]
+    
+    for k in episode_metrics:
+        if episode_metrics[k].ndim == 1:
+            episode_metrics[k] = episode_metrics[k][np.newaxis, :]
         
     eval_metrics = utils.append_episode_metrics(
         steps_done,
