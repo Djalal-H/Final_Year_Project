@@ -3,7 +3,7 @@
 *.egg-info
 
 # Local data
-mini_datasets/
+data
 
 #virtual environment
 vmax_venv

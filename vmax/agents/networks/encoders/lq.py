@@ -47,6 +47,7 @@ class LQAttention(nn.Module):
     attn_dropout: float = 0.0
     ff_dropout: float = 0.0
     tie_layer_weights: bool = False
+    return_attention_weights: bool = False
 
     @nn.compact
     def __call__(self, x, mask=None):
@@ -57,7 +58,8 @@ class LQAttention(nn.Module):
             mask: Input mask.
 
         Returns:
-            Output tensor after applying attention.
+            If return_attention_weights=False: Output tensor after applying attention.
+            If return_attention_weights=True: Tuple of (output tensor, attention_weights_dict).
 
         """
         bs, dim = x.shape[0], x.shape[-1]
@@ -65,6 +67,9 @@ class LQAttention(nn.Module):
         # Learnable latent feature
         latents = self.param("latents", init.normal(), (self.num_latents, dim * self.ff_mult))
         latent = einops.repeat(latents, "n d -> b n d", b=bs)
+        
+        # Dictionary to store attention weights for XAI analysis
+        attention_weights = {} if self.return_attention_weights else None
 
         # Cross, self attention and feedforward layers
         cross_attn = partial(
@@ -72,12 +77,14 @@ class LQAttention(nn.Module):
             heads=self.cross_num_heads,
             head_features=self.cross_head_features,
             dropout=self.attn_dropout,
+            return_attention_weights=self.return_attention_weights,
         )
         self_attn = partial(
             encoders.AttentionLayer,
             heads=self.latent_num_heads,
             head_features=self.latent_head_features,
             dropout=self.attn_dropout,
+            return_attention_weights=self.return_attention_weights,
         )
         ff = partial(encoders.FeedForward, mult=self.ff_mult, dropout=self.ff_dropout)
 
@@ -90,21 +97,43 @@ class LQAttention(nn.Module):
             for i in range(self.depth):
                 # Single ReZero at each loop (or ReZero for CA and for SA)
                 rz = encoders.ReZero(name=f"rezero_cross_{i}")
-                latent += rz(ca(latent, x, mask_k=mask))
+                if self.return_attention_weights:
+                    ca_out, ca_weights = ca(latent, x, mask_k=mask)
+                    attention_weights[f"cross_attn_{i}"] = ca_weights
+                    latent += rz(ca_out)
+                else:
+                    latent += rz(ca(latent, x, mask_k=mask))
                 latent += rz(cf(latent))
                 rz = encoders.ReZero(name=f"rezero_self_{i}")
-                latent += rz(sa(latent))
+                if self.return_attention_weights:
+                    sa_out, sa_weights = sa(latent)
+                    attention_weights[f"self_attn_{i}"] = sa_weights
+                    latent += rz(sa_out)
+                else:
+                    latent += rz(sa(latent))
                 latent += rz(lf(latent))
         else:
             # different weights for each attn block in the lq
             for i in range(self.depth):
                 rz = encoders.ReZero(name=f"rezero_cross{i}")
-                latent += rz(cross_attn(name=f"cross_attn_{i}")(latent, x, mask_k=mask))
+                if self.return_attention_weights:
+                    ca_out, ca_weights = cross_attn(name=f"cross_attn_{i}")(latent, x, mask_k=mask)
+                    attention_weights[f"cross_attn_{i}"] = ca_weights
+                    latent += rz(ca_out)
+                else:
+                    latent += rz(cross_attn(name=f"cross_attn_{i}")(latent, x, mask_k=mask))
                 latent += rz(ff(name=f"cross_ff_{i}")(latent))
                 rz = encoders.ReZero(name=f"rezero_self_{i}")
-                latent += rz(self_attn(name=f"latent_attn_{i}")(latent))
+                if self.return_attention_weights:
+                    sa_out, sa_weights = self_attn(name=f"latent_attn_{i}")(latent)
+                    attention_weights[f"self_attn_{i}"] = sa_weights
+                    latent += rz(sa_out)
+                else:
+                    latent += rz(self_attn(name=f"latent_attn_{i}")(latent))
                 latent += rz(ff(name=f"latent_ff_{i}")(latent))
 
+        if self.return_attention_weights:
+            return latent, attention_weights
         return latent
 
 
@@ -145,6 +174,7 @@ class LQEncoder(nn.Module):
     attn_dropout: float = 0.0
     ff_dropout: float = 0.0
     tie_layer_weights: bool = False
+    return_attention_weights: bool = False
 
     @nn.compact
     def __call__(self, obs: jax.Array) -> jax.Array:
@@ -154,7 +184,8 @@ class LQEncoder(nn.Module):
             obs: Input observation tensor.
 
         Returns:
-            Encoded output tensor.
+            If return_attention_weights=False: Encoded output tensor.
+            If return_attention_weights=True: Tuple of (output tensor, attention_weights_dict).
 
         """
         # Get features and masks
@@ -253,9 +284,14 @@ class LQEncoder(nn.Module):
             attn_dropout=self.attn_dropout,
             ff_dropout=self.ff_dropout,
             tie_layer_weights=self.tie_layer_weights,
+            return_attention_weights=self.return_attention_weights,
             name="lq_attention",
         )(input, mask)
-
-        output = output.mean(axis=1)
-
-        return output
+        
+        if self.return_attention_weights:
+            latent, attention_weights = output
+            output_encoded = latent.mean(axis=1)
+            return output_encoded, attention_weights
+        else:
+            output_encoded = output.mean(axis=1)
+            return output_encoded
