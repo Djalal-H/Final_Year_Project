@@ -423,6 +423,20 @@ def print_calibration_report(results: Dict[str, Any], model_name: str = "Model")
     print(f"  Vehicle observations: {s['n_vehicle_observations']}")
     print(f"  Mean criticality:    {s['mean_criticality']:.4f} ± {s['std_criticality']:.4f}")
     
+    # Critical Scenarios Info
+    if 'critical_scenarios_info' in results:
+        info = results['critical_scenarios_info']
+        crit_list = info['list']
+        threshold = info['threshold']
+        print(f"  Critical scenarios:  {len(crit_list)} (threshold: {threshold})")
+        if crit_list:
+            ids = [c['scenario_id'] for c in crit_list]
+            # Show up to 20 IDs
+            ids_str = ", ".join(map(str, ids[:20]))
+            if len(ids) > 20:
+                ids_str += " ..."
+            print(f"    IDs: {ids_str}")
+    
     # Per-metric summary
     print(f"\n  Concentration Metrics (scene-level mean ± std):")
     for m in CONCENTRATION_METRICS:
@@ -535,6 +549,13 @@ def analyze_single(extraction_path: str, model_name: Optional[str] = None) -> Di
     
     # Core calibration
     calibration = compute_calibration_score(paired)
+    
+    # Add critical scenario info if present in extraction data
+    if 'critical_scenarios' in data:
+        calibration['critical_scenarios_info'] = {
+            'list': data['critical_scenarios'],
+            'threshold': data.get('critical_threshold', 0.7)
+        }
     
     # Regime breakdown
     regime = compute_regime_breakdown(paired)
