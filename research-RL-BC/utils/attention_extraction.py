@@ -68,6 +68,10 @@ class OfflineExtractor:
     # Reference thresholds: 3.4 comfortable, 6.0 hard, 8.0 emergency
     DRAC_MAX = 8.0  # m/s²
     
+    # Criticality threshold for identifying critical scenarios
+    # Scenarios with max criticality >= this threshold are flagged
+    CRITICAL_THRESHOLD = 0.5  # Moderate criticality regime
+    
     def __init__(self, run_dir: str, dataset_path: str, checkpoint_name: str = "model_final.pkl"):
         """Initialize the extractor.
         
@@ -814,6 +818,8 @@ class OfflineExtractor:
         )
         
         results = []
+        critical_scenarios = []  # Track critical scenario indices
+        
         print(f"[OfflineExtractor] Processing {n_scenarios} scenarios...")
         
         for i, scenario_batch in enumerate(data_gen):
@@ -842,7 +848,23 @@ class OfflineExtractor:
                 # Use pre-computed observation and squeezed state for extraction
                 result = self.extract_scenario_with_obs(reset_state, obs, scenario_id=i)
                 results.append(result)
-                print(" ✓")
+                
+                # Check if scenario is critical
+                if 'semantic_features' in result and 'criticality' in result['semantic_features']:
+                    criticality = result['semantic_features']['criticality']
+                    valid = result['semantic_features'].get('valid', np.ones_like(criticality))
+                    max_criticality = float(np.max(criticality[valid > 0.5])) if np.any(valid > 0.5) else 0.0
+                    
+                    if max_criticality >= self.CRITICAL_THRESHOLD:
+                        critical_scenarios.append({
+                            'scenario_id': i,
+                            'max_criticality': max_criticality
+                        })
+                        print(f" ✓ [CRITICAL: {max_criticality:.3f}]")
+                    else:
+                        print(" ✓")
+                else:
+                    print(" ✓")
             except Exception as e:
                 print(f" ✗ Error: {e}")
                 import traceback
@@ -860,6 +882,8 @@ class OfflineExtractor:
             'run_dir': self.run_dir,
             'n_scenarios': len(results),
             'scenarios': results,
+            'critical_scenarios': critical_scenarios,
+            'critical_threshold': self.CRITICAL_THRESHOLD,
             'config': {
                 'encoder': self.config.get('encoder', {}),
                 'observation_config': self.config.get('observation_config', {}),
@@ -870,6 +894,9 @@ class OfflineExtractor:
             pickle.dump(output_data, f, protocol=pickle.HIGHEST_PROTOCOL)
         
         print(f"\n[OfflineExtractor] Saved {len(results)} scenarios to {output_path}")
+        print(f"[OfflineExtractor] Critical scenarios: {len(critical_scenarios)}/{len(results)} (threshold: {self.CRITICAL_THRESHOLD})")
+        if critical_scenarios:
+            print(f"[OfflineExtractor] Critical scenario IDs: {[s['scenario_id'] for s in critical_scenarios[:10]]}{'...' if len(critical_scenarios) > 10 else ''}")
         print(f"[OfflineExtractor] Total file size: {os.path.getsize(output_path) / 1024 / 1024:.2f} MB")
         
         return results

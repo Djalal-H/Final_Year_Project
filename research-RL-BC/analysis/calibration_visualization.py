@@ -27,6 +27,14 @@ import matplotlib.gridspec as gridspec
 from matplotlib.ticker import MaxNLocator
 from scipy import stats
 
+# LOWESS for non-linear trend fitting
+try:
+    from statsmodels.nonparametric.smoothers_lowess import lowess
+    LOWESS_AVAILABLE = True
+except ImportError:
+    LOWESS_AVAILABLE = False
+    print("[Warning] statsmodels not available. Using linear fit instead of LOWESS.")
+
 # Add project paths
 analysis_dir = os.path.dirname(os.path.abspath(__file__))
 research_dir = os.path.dirname(analysis_dir)
@@ -144,13 +152,26 @@ def plot_scatter_concentration_criticality(
         ax.scatter(sc, sn, c=color, alpha=0.6, s=50, edgecolors='white',
                    linewidth=0.5, zorder=3)
         
-        # Trend line
-        if len(sc) >= 3:
-            z = np.polyfit(sc, sn, 1)
-            p = np.poly1d(z)
-            x_line = np.linspace(sc.min(), sc.max(), 100)
-            ax.plot(x_line, p(x_line), '--', color=color, alpha=0.8, linewidth=2,
-                    label=f'Linear fit')
+        # Trend curve (LOWESS for non-linear monotonic relationships)
+        if len(sc) >= 10:
+            if LOWESS_AVAILABLE:
+                # Sort data for LOWESS
+                sort_idx = np.argsort(sc)
+                sc_sorted = sc[sort_idx]
+                sn_sorted = sn[sort_idx]
+                
+                # LOWESS smoothing (frac controls smoothness: lower = more local)
+                smoothed = lowess(sn_sorted, sc_sorted, frac=0.3, return_sorted=False)
+                
+                ax.plot(sc_sorted, smoothed, '-', color=color, alpha=0.9, linewidth=2.5,
+                        label='LOWESS trend', zorder=4)
+            else:
+                # Fallback to linear fit
+                z = np.polyfit(sc, sn, 1)
+                p = np.poly1d(z)
+                x_line = np.linspace(sc.min(), sc.max(), 100)
+                ax.plot(x_line, p(x_line), '--', color=color, alpha=0.8, linewidth=2,
+                        label='Linear fit', zorder=4)
             
             # Correlation annotation
             r, pval = stats.spearmanr(sc, sn)
@@ -175,13 +196,26 @@ def plot_scatter_concentration_criticality(
         ax.scatter(vc, va, c=COLORS['secondary'], alpha=0.35, s=25,
                    edgecolors='white', linewidth=0.3, zorder=3)
         
-        # Trend line
-        if len(vc) >= 3:
-            z = np.polyfit(vc, va, 1)
-            p = np.poly1d(z)
-            x_line = np.linspace(vc.min(), vc.max(), 100)
-            ax.plot(x_line, p(x_line), '--', color=COLORS['secondary'],
-                    alpha=0.8, linewidth=2)
+        # Trend curve (LOWESS for non-linear relationships)
+        if len(vc) >= 50:  # Vehicle-level has many more data points
+            if LOWESS_AVAILABLE:
+                # Sort data for LOWESS
+                sort_idx = np.argsort(vc)
+                vc_sorted = vc[sort_idx]
+                va_sorted = va[sort_idx]
+                
+                # LOWESS smoothing (smaller frac for large datasets)
+                smoothed = lowess(va_sorted, vc_sorted, frac=0.15, return_sorted=False)
+                
+                ax.plot(vc_sorted, smoothed, '-', color=COLORS['secondary'], 
+                        alpha=0.9, linewidth=2.5, label='LOWESS trend', zorder=4)
+            else:
+                # Fallback to linear fit
+                z = np.polyfit(vc, va, 1)
+                p = np.poly1d(z)
+                x_line = np.linspace(vc.min(), vc.max(), 100)
+                ax.plot(x_line, p(x_line), '--', color=COLORS['secondary'],
+                        alpha=0.8, linewidth=2, zorder=4)
             
             # Correlation
             r, pval = stats.spearmanr(vc, va)
@@ -235,13 +269,26 @@ def plot_multi_metric_scatter(
         ax.scatter(sc, sn, c=color, alpha=0.55, s=50, edgecolors='white',
                    linewidth=0.5, zorder=3)
         
-        # Trend line with confidence band
-        if len(sc) >= 3:
-            z = np.polyfit(sc, sn, 1)
-            p = np.poly1d(z)
-            x_line = np.linspace(sc.min(), sc.max(), 100)
-            y_line = p(x_line)
-            ax.plot(x_line, y_line, '--', color=color, alpha=0.8, linewidth=2)
+        # Trend curve (LOWESS for non-linear relationships)
+        if len(sc) >= 10:
+            if LOWESS_AVAILABLE:
+                # Sort data for LOWESS
+                sort_idx = np.argsort(sc)
+                sc_sorted = sc[sort_idx]
+                sn_sorted = sn[sort_idx]
+                
+                # LOWESS smoothing
+                smoothed = lowess(sn_sorted, sc_sorted, frac=0.3, return_sorted=False)
+                
+                ax.plot(sc_sorted, smoothed, '-', color=color, alpha=0.9, linewidth=2.5,
+                        zorder=4)
+            else:
+                # Fallback to linear fit
+                z = np.polyfit(sc, sn, 1)
+                p = np.poly1d(z)
+                x_line = np.linspace(sc.min(), sc.max(), 100)
+                y_line = p(x_line)
+                ax.plot(x_line, y_line, '--', color=color, alpha=0.8, linewidth=2)
             
             # Spearman and Pearson
             r_s, p_s = stats.spearmanr(sc, sn)
