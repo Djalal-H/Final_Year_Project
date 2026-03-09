@@ -125,7 +125,7 @@ def make_inference_fn(sac_network: BCSACNetworks) -> datatypes.Policy:
 
     def make_policy(params: datatypes.Params, deterministic: bool = False) -> datatypes.Policy:
         def policy(observations: jax.Array, key_sample: jax.Array = None) -> jax.Array:
-            logits = sac_network.policy_network.apply(params, observations)
+            logits, _ = sac_network.policy_network.apply(params, observations)
 
             if deterministic:
                 return sac_network.parametric_action_distribution.mode(logits), {}
@@ -323,7 +323,7 @@ def _make_rl_losses(bc_sac_network: BCSACNetworks, alpha: float, discount: float
         key: jax.Array,
     ) -> jax.Array:
         value_old_action = value_network.apply(value_params, transitions.observation, transitions.action)
-        next_dist_params = policy_network.apply(policy_params, transitions.next_observation)
+        next_dist_params, _ = policy_network.apply(policy_params, transitions.next_observation)
 
         next_action = parametric_action_distribution.sample_no_postprocessing(next_dist_params, key)
         next_log_prob = parametric_action_distribution.log_prob(next_dist_params, next_action)
@@ -344,7 +344,7 @@ def _make_rl_losses(bc_sac_network: BCSACNetworks, alpha: float, discount: float
         transitions: datatypes.RLTransition,
         key: jax.Array,
     ) -> jax.Array:
-        dist_params = policy_network.apply(policy_params, transitions.observation)
+        dist_params, _ = policy_network.apply(policy_params, transitions.observation)
 
         action = parametric_action_distribution.sample_no_postprocessing(dist_params, key)
         log_prob = parametric_action_distribution.log_prob(dist_params, action)
@@ -378,7 +378,7 @@ def _make_imitation_losses(bc_sac_network: BCSACNetworks, loss_type: str) -> cal
         transitions: datatypes.RLTransition,
         key: jax.Array,
     ) -> jax.Array:
-        dist_params = policy_network.apply(policy_params, transitions.observation)
+        dist_params, _ = policy_network.apply(policy_params, transitions.observation)
         action = parametric_action_distribution.sample_no_postprocessing(dist_params, key)
         action = parametric_action_distribution.postprocess(action)
 

@@ -109,7 +109,7 @@ def make_inference_fn(ppo_networks: PPONetworks) -> datatypes.Policy:
         parametric_action_distribution = ppo_networks.parametric_action_distribution
 
         def policy(observations: jax.Array, key_sample: jax.Array = None) -> tuple[jax.Array, dict]:
-            logits = policy_network.apply(params, observations)
+            logits, _ = policy_network.apply(params, observations)
 
             if deterministic:
                 return parametric_action_distribution.mode(logits), {}
@@ -308,7 +308,7 @@ def _make_loss_fn(
         # Flatten the batch dimension
         obs = jnp.reshape(data.observation, (-1,) + data.observation.shape[2:])
 
-        policy_logits = policy_apply(params.policy, obs)
+        policy_logits, _ = policy_apply(params.policy, obs)
         baseline = value_apply(params.value, obs).squeeze(-1)
 
         # Unflatten the batch dimension

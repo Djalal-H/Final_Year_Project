@@ -53,6 +53,9 @@ def train(
     progress_fn: Callable[[int, datatypes.Metrics], None] = lambda *args: None,
     checkpoint_logdir: str = "",
     disable_tqdm: bool = False,
+    lambda_diversity: float = 0.0,
+    lambda_safety: float = 0.0,
+    safety_head_index: int = 0,
 ) -> None:
     """Train a SAC agent.
 
@@ -82,6 +85,9 @@ def train(
         progress_fn: Callback function for progress updates.
         checkpoint_logdir: Directory path for saving checkpoints.
         disable_tqdm: Flag to disable tqdm progress bar.
+        lambda_diversity: Weight for attention head diversity loss.
+        lambda_safety: Weight for safety-grounded attention loss.
+        safety_head_index: Index of the attention head for safety alignment.
 
     """
     print(" SAC ".center(40, "="))
@@ -111,7 +117,12 @@ def train(
         num_devices,
         network_key,
     )
-    learning_fn = sac.make_sgd_step(network, alpha, discount, tau)
+    learning_fn = sac.make_sgd_step(
+        network, alpha, discount, tau,
+        lambda_diversity=lambda_diversity,
+        lambda_safety=lambda_safety,
+        safety_head_index=safety_head_index,
+    )
     step_fn = partial(inference.policy_step, use_partial_transition=True)
 
     replay_buffer = ReplayBuffer(

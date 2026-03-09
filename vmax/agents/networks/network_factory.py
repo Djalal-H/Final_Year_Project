@@ -39,17 +39,24 @@ class PolicyNetwork(nn.Module):
             obs: The observation tensor.
 
         Returns:
-            The network's output tensor.
+            Tuple of (logits, attention_weights_dict).
+            logits: The network's output tensor.
+            attention_weights_dict: Dictionary of attention weights from the encoder
+                (empty dict if no encoder is used).
 
         """
-        x = self.encoder_layer(obs) if self.encoder_layer is not None else obs
+        attn_weights = {}
+        if self.encoder_layer is not None:
+            x, attn_weights = self.encoder_layer(obs)
+        else:
+            x = obs
         x = self.fully_connected_layer(x)
         x = nn.Dense(self.output_size)(x)
 
         if self.final_activation:
             x = self.final_activation(x)
 
-        return x
+        return x, attn_weights
 
 
 class ValueNetwork(nn.Module):
@@ -78,13 +85,13 @@ class ValueNetwork(nn.Module):
         shared_encoder = self.shared_encoder and self.encoder_layer is not None
 
         if self.shared_encoder and self.encoder_layer is not None:
-            obs = self.encoder_layer(obs)
+            obs, _ = self.encoder_layer(obs)  # Discard attention weights
 
         out = []
         for _ in range(self.num_networks):
             x = obs
             if not shared_encoder and self.encoder_layer is not None:
-                x = self.encoder_layer(x)
+                x, _ = self.encoder_layer(x)  # Discard attention weights
 
             x = jnp.concatenate([x, actions], axis=-1) if actions is not None else x
             x = self.fully_connected_layer(x)

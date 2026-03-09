@@ -101,7 +101,7 @@ def make_inference_fn(bc_network: BCNetwork) -> datatypes.Policy:
         policy_network = bc_network.policy_network
 
         def policy(observations: jax.Array, key_sample: jax.Array = None) -> jax.Array:
-            logits = policy_network.apply(params, observations)
+            logits, _ = policy_network.apply(params, observations)
 
             return logits, {}
 
@@ -191,7 +191,7 @@ def _make_loss_fn(bc_network: BCNetwork, loss_type: str):
     policy_network = bc_network.policy_network
 
     def compute_policy_loss(policy_params: datatypes.Params, transitions: datatypes.RLTransition) -> jax.Array:
-        action = policy_network.apply(policy_params, transitions.observation)
+        action, _ = policy_network.apply(policy_params, transitions.observation)
 
         if loss_type == "mse":
             policy_loss = ((action - transitions.action) ** 2).mean()
