@@ -4,14 +4,14 @@
 
 from .attention_utils import AttentionLayer, FeedForward, LocalAttentionLayer, ReZero, nearest_neighbors_jax
 from .embedding_utils import build_mlp_embedding
-from .lq import LQEncoder
+from .lq import LQEncoder, PerceiverEncoder
 from .lqh import LQHEncoder
 from .mlp import MLPEncoder
 from .mtr import MTREncoder
 from .wayformer import WayformerEncoder
 
 
-Encoder = MLPEncoder | LQEncoder | WayformerEncoder | MTREncoder | LQHEncoder
+Encoder = MLPEncoder | LQEncoder | PerceiverEncoder | WayformerEncoder | MTREncoder | LQHEncoder
 
 
 def get_encoder(encoder_name: str, **kwargs) -> Encoder:
@@ -34,6 +34,7 @@ def get_encoder(encoder_name: str, **kwargs) -> Encoder:
         "wayformer": WayformerEncoder,
         "mtr": MTREncoder,
         "lqh": LQHEncoder,
+        "perceiver": PerceiverEncoder,
     }
 
     try:
@@ -51,6 +52,7 @@ __all__ = [
     "LocalAttentionLayer",
     "MLPEncoder",
     "MTREncoder",
+    "PerceiverEncoder",
     "ReZero",
     "WayformerEncoder",
     "build_mlp_embedding",

@@ -1,0 +1,56 @@
+{
+  "checkpoint_step": -1,
+  "checkpoint": "model_final.pkl",
+  "methodology": "within_module_distributional",
+  "analysis_modes": [
+    "option_a_consistent",
+    "option_b_risk_dependent"
+  ],
+  "hsi_threshold": 0.3,
+  "heads": {
+    "0": {
+      "name": "General Context Head",
+      "description": "Diffuse attention without strong feature specialization",
+      "primary_feature": "vehicle_attn_vs_distance",
+      "hsi": 0.29054044378097416,
+      "correlation": -0.29054044378097416,
+      "specialized": false,
+      "reason": "Below threshold",
+      "risk_profile": {
+        "n_calm": 1451,
+        "n_danger": 56,
+        "calm_max_vehicle_frac": 0.6768549945254231,
+        "danger_max_vehicle_frac": 0.6505408579749721,
+        "max_frac_gap": -0.026314136550451006,
+        "calm_vehicle_entropy": 0.6705141172330129,
+        "danger_vehicle_entropy": 0.7351374711309161,
+        "entropy_gap": 0.06462335389790319,
+        "calm_rg_concentration": 0.4344698932665986,
+        "danger_rg_concentration": 0.44171149692231315,
+        "rg_conc_gap": 0.007241603655714579
+      }
+    },
+    "1": {
+      "name": "General Context Head",
+      "description": "Diffuse attention without strong feature specialization",
+      "primary_feature": "vehicle_attn_vs_distance",
+      "hsi": 0.18891878137823537,
+      "correlation": -0.18891878137823537,
+      "specialized": false,
+      "reason": "Below threshold",
+      "risk_profile": {
+        "n_calm": 1451,
+        "n_danger": 56,
+        "calm_max_vehicle_frac": 0.6594192928934327,
+        "danger_max_vehicle_frac": 0.6642261291188853,
+        "max_frac_gap": 0.0048068362254526376,
+        "calm_vehicle_entropy": 0.8987559898814853,
+        "danger_vehicle_entropy": 0.8702098695295197,
+        "entropy_gap": -0.028546120351965576,
+        "calm_rg_concentration": 0.6247666389603933,
+        "danger_rg_concentration": 0.604042893680095,
+        "rg_conc_gap": -0.0207237452802983
+      }
+    }
+  }
+}

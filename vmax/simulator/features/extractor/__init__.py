@@ -36,6 +36,7 @@ def get_extractor(name: str) -> AbstractFeaturesExtractor:
     """
     mapping = {
         "vec": VecFeaturesExtractor,
+        "road": VecFeaturesExtractor,
         "gt": GTFeaturesExtractor,
         "idm": IDMFeaturesExtractor,
     }

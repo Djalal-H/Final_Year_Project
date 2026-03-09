@@ -31,8 +31,13 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from waymax import dynamics
+from waymax import datatypes as waymax_datatypes
+from waymax.agents import expert
+
+from vmax.simulator import operations
 
 from vmax.simulator import make_env_for_evaluation, datasets, make_data_generator
+from vmax.simulator.wrappers.interfaces.brax import EnvTransition
 from vmax.agents.learning.reinforcement.ppo import ppo_factory
 from vmax.agents.networks import network_utils
 from vmax.scripts.evaluate.utils import load_params, load_yaml_config
@@ -53,6 +58,18 @@ class OfflineExtractor:
     
     # Time horizon for TTC computation (seconds)
     TTC_HORIZON = 5.0
+    
+    # Maximum timesteps for multi-timestep rollout
+    MAX_TIMESTEPS = 80
+    
+    # Attention module keys (per-module, late-fusion architecture)
+    MODULE_KEYS = [
+        'sdc_traj',
+        'other_traj',
+        'roadgraph',
+        'traffic_lights',
+        'gps_path',
+    ]
     
     def __init__(self, run_dir: str, dataset_path: str, checkpoint_name: str = "model_final.pkl"):
         """Initialize the extractor.
@@ -491,6 +508,268 @@ class OfflineExtractor:
         
         return semantic_features
     
+    # =========================================================================
+    # NEW: Multi-timestep rollout methods
+    # =========================================================================
+    
+    def _extract_within_module_distributions(self, attn_weights: Dict[str, np.ndarray]) -> Dict[str, Any]:
+        """Extract within-module attention distributions for each module.
+        
+        Instead of summing all tokens (which trivially gives ~1.0 due to softmax),
+        this computes how attention is *distributed* across entities within each module.
+        
+        Returns a dict with per-module distributional data:
+        - 'per_vehicle_attention': shape (n_vehicles, n_heads) — agent module
+        - 'roadgraph_concentration': shape (n_heads,) — entropy-based concentration
+        - 'roadgraph_max_fraction': shape (n_heads,) — max attention fraction
+        - 'per_light_attention': shape (n_lights, n_heads) — traffic light module  
+        - 'per_waypoint_attention': shape (n_waypoints, n_heads) — GPS module
+        - 'per_sdc_timestep_attention': shape (n_obs_timesteps, n_heads) — SDC module
+        """
+        result = {}
+        
+        for module_name in self.MODULE_KEYS:
+            key = f"{module_name}/cross_attn_0"
+            if key not in attn_weights:
+                continue
+            
+            # Shape: (batch, n_latents, n_module_tokens, n_heads)
+            attn = attn_weights[key]
+            
+            # Remove batch dimension
+            if attn.ndim == 4:
+                attn = attn[0]  # (n_latents, n_module_tokens, n_heads)
+            
+            n_latents, n_tokens, n_heads = attn.shape
+            
+            if module_name == 'other_traj':
+                # Agent module: n_tokens = n_vehicles * n_obs_timesteps (e.g., 8 * 5 = 40)
+                n_v = self._n_vehicles
+                n_t = self._n_timesteps
+                
+                if n_tokens == n_v * n_t:
+                    # Reshape: (n_latents, n_vehicles, n_obs_timesteps, n_heads)
+                    attn_reshaped = attn.reshape(n_latents, n_v, n_t, n_heads)
+                    # Sum over obs_timesteps, average over latents → (n_vehicles, n_heads)
+                    per_vehicle = attn_reshaped.sum(axis=2).mean(axis=0)
+                    # Normalize to fractions (each head sums to 1 across vehicles)
+                    total = per_vehicle.sum(axis=0, keepdims=True)
+                    total = np.where(total > 0, total, 1.0)
+                    result['per_vehicle_attention'] = per_vehicle / total
+                else:
+                    # Fallback: can't reshape, just average over latents
+                    attn_avg = attn.mean(axis=0)  # (n_tokens, n_heads)
+                    total = attn_avg.sum(axis=0, keepdims=True)
+                    total = np.where(total > 0, total, 1.0)
+                    result['per_vehicle_attention'] = attn_avg / total
+            
+            elif module_name == 'roadgraph':
+                # Roadgraph: 200 tokens — compute concentration metrics per head
+                attn_avg = attn.mean(axis=0)  # (n_tokens, n_heads)
+                # Normalize to probability distribution per head
+                total = attn_avg.sum(axis=0, keepdims=True)
+                total = np.where(total > 0, total, 1.0)
+                probs = attn_avg / total  # (n_tokens, n_heads)
+                
+                # Entropy per head: H = -sum(p * log(p))
+                log_probs = np.where(probs > 1e-10, np.log(probs), 0.0)
+                entropy = -(probs * log_probs).sum(axis=0)  # (n_heads,)
+                max_entropy = np.log(n_tokens)  # Maximum possible entropy
+                
+                # Concentration = 1 - normalized_entropy (high = focused, low = diffuse)
+                result['roadgraph_concentration'] = 1.0 - entropy / max_entropy
+                result['roadgraph_max_fraction'] = probs.max(axis=0)  # (n_heads,)
+                result['roadgraph_entropy'] = entropy  # (n_heads,)
+            
+            elif module_name == 'traffic_lights':
+                # Traffic lights: n_lights * n_obs_timesteps (e.g., 5 * 5 = 25)
+                n_l = self._n_traffic_lights
+                n_t = self._n_timesteps
+                
+                if n_tokens == n_l * n_t:
+                    attn_reshaped = attn.reshape(n_latents, n_l, n_t, n_heads)
+                    per_light = attn_reshaped.sum(axis=2).mean(axis=0)  # (n_lights, n_heads)
+                    total = per_light.sum(axis=0, keepdims=True)
+                    total = np.where(total > 0, total, 1.0)
+                    result['per_light_attention'] = per_light / total
+                else:
+                    attn_avg = attn.mean(axis=0)
+                    total = attn_avg.sum(axis=0, keepdims=True)
+                    total = np.where(total > 0, total, 1.0)
+                    result['per_light_attention'] = attn_avg / total
+            
+            elif module_name == 'gps_path':
+                # GPS: n_waypoints tokens (e.g., 3 or 10)
+                attn_avg = attn.mean(axis=0)  # (n_waypoints, n_heads)
+                total = attn_avg.sum(axis=0, keepdims=True)
+                total = np.where(total > 0, total, 1.0)
+                result['per_waypoint_attention'] = attn_avg / total
+            
+            elif module_name == 'sdc_traj':
+                # SDC: 1 * n_obs_timesteps tokens (e.g., 5)
+                attn_avg = attn.mean(axis=0)  # (n_obs_timesteps, n_heads)
+                total = attn_avg.sum(axis=0, keepdims=True)
+                total = np.where(total > 0, total, 1.0)
+                result['per_sdc_timestep_attention'] = attn_avg / total
+        
+        return result
+    
+    def _compute_collision_risk(self, semantic_features: Dict[str, np.ndarray]) -> float:
+        """Compute scene-level collision risk R from per-agent TTC values.
+        
+        R = clip(1 - min(TTC_j for valid non-ego agents) / 3.0, 0, 1)
+        
+        R = 0 means safe (all agents' TTC >= 3s).
+        R = 1 means imminent collision.
+        
+        Returns:
+            Float in [0, 1].
+        """
+        ttc = semantic_features.get('ttc')
+        if ttc is None:
+            return 0.0
+        
+        # Filter out ego vehicle
+        sdc_idx = semantic_features.get('sdc_index', 0)
+        valid = semantic_features.get('valid')
+        
+        mask = np.ones(len(ttc), dtype=bool)
+        if sdc_idx < len(mask):
+            mask[sdc_idx] = False
+        if valid is not None:
+            mask &= np.array(valid).astype(bool)
+        
+        ttc_valid = ttc[mask]
+        
+        if len(ttc_valid) == 0:
+            return 0.0
+        
+        min_ttc = float(np.min(ttc_valid))
+        risk = np.clip(1.0 - min_ttc / 3.0, 0.0, 1.0)
+        return float(risk)
+    
+    def _expert_step_single(self, env_transition: 'EnvTransition') -> 'EnvTransition':
+        """Perform a single expert log-replay step.
+        
+        Extracts the logged expert action for the SDC and steps the environment.
+        This does NOT require the learned policy — it replays what the human driver did.
+        
+        Args:
+            env_transition: Current environment transition (with batch dim from vmap).
+            
+        Returns:
+            Next environment transition.
+        """
+        # Get expert action from logged trajectory: (num_envs, num_agents, 2)
+        actions = expert.infer_expert_action(
+            env_transition.state, self.env.get_wrapper_attr("dynamics_model")
+        ).data
+        
+        # Get SDC index
+        sdc_idx = operations.get_index(env_transition.state.object_metadata.is_sdc)
+        sdc_idx = jnp.expand_dims(sdc_idx, axis=(0, 1, 2))
+        
+        # Extract SDC action: (num_envs, 1, 2) -> (num_envs, 2)
+        action_sdc = jnp.take_along_axis(actions, sdc_idx, axis=-2)
+        action_sdc = jnp.squeeze(action_sdc, axis=-2)
+        
+        # Create valid action and step
+        valid_mask = jnp.ones_like(action_sdc[..., 0:1], dtype=jnp.bool_)
+        action = waymax_datatypes.Action(data=action_sdc, valid=valid_mask)
+        action.validate()
+        
+        return self.env.step(env_transition, action)
+    
+    def run_episode(self, scenario_data, scenario_id: int = 0) -> Dict[str, Any]:
+        """Roll out expert trajectory for T timesteps, extracting attention at each step.
+        
+        Uses expert log-replay (not the learned policy) for stepping. The encoder
+        still processes observations using the trained weights, so attention patterns
+        reflect the learned model's perception of the scene.
+        
+        Args:
+            scenario_data: Batched scenario data from the data generator.
+            scenario_id: ID for this scenario.
+            
+        Returns:
+            Dictionary with per-timestep extraction data.
+        """
+        # Reset environment
+        env_transition = self.env.reset(scenario_data)
+        
+        # JIT-compile the encoder forward pass
+        @jax.jit
+        def forward_with_attention(e_params, observation):
+            latent, attention_weights = self.encoder.apply(
+                {'params': e_params},
+                observation
+            )
+            return latent, attention_weights
+        
+        timestep_records = []
+        
+        for t in range(self.MAX_TIMESTEPS):
+            # 1. Extract attention from encoder using current observation
+            obs = env_transition.observation
+            _, attn_weights = forward_with_attention(self.encoder_params, obs)
+            
+            # Convert to numpy
+            attn_weights_np = jax.tree_util.tree_map(
+                lambda x: np.array(jax.device_get(x)),
+                attn_weights
+            )
+            
+            # 2. Extract within-module attention distributions
+            attn_distributions = self._extract_within_module_distributions(attn_weights_np)
+            
+            # 3. Squeeze state for semantic feature extraction
+            squeezed_state = jax.tree_util.tree_map(
+                lambda x: x.squeeze(0) if hasattr(x, 'squeeze') and x.ndim > 0 else x,
+                env_transition.state
+            )
+            
+            # 4. Extract semantic features
+            semantic = self.extract_semantic_features(squeezed_state)
+            
+            # 5. Compute collision risk R
+            risk = self._compute_collision_risk(semantic)
+            
+            # 6. Store this timestep's data
+            timestep_records.append({
+                'timestep': t,
+                'attention_distributions': attn_distributions,
+                'semantic_features': semantic,
+                'collision_risk': risk,
+            })
+            
+            # 7. Check termination BEFORE stepping (done from previous step)
+            if t > 0 and bool(jax.device_get(env_transition.done)):
+                break
+            
+            # 8. Step using expert log-replay
+            try:
+                env_transition = self._expert_step_single(env_transition)
+            except Exception as e:
+                print(f"    [Episode] Step {t} failed: {e}")
+                break
+        
+        return {
+            'scenario_id': scenario_id,
+            'n_timesteps': len(timestep_records),
+            'timesteps': timestep_records,
+            'token_boundaries': self.token_boundaries,
+            'metadata': {
+                'n_vehicles': self._n_vehicles,
+                'n_timesteps_config': self._n_timesteps,
+                'n_roadgraph': self._n_roadgraph,
+                'n_traffic_lights': self._n_traffic_lights,
+            },
+        }
+    
+    # =========================================================================
+    # Legacy single-snapshot methods (kept for backward compatibility)
+    # =========================================================================
+    
     def extract_scenario(self, scenario, scenario_id: int = 0) -> Dict[str, Any]:
         """Extract all data from a single scenario.
         
@@ -591,12 +870,14 @@ class OfflineExtractor:
             }
         }
     
-    def run(self, n_scenarios: int, output_path: str) -> List[Dict[str, Any]]:
+    def run(self, n_scenarios: int, output_path: str, rollout: bool = False) -> List[Dict[str, Any]]:
         """Run extraction on multiple scenarios.
         
         Args:
             n_scenarios: Number of scenarios to process.
             output_path: Path to save the results.
+            rollout: If True, use multi-timestep rollout with expert log-replay.
+                     If False, use legacy single-snapshot extraction.
             
         Returns:
             List of extraction results.
@@ -612,35 +893,36 @@ class OfflineExtractor:
         )
         
         results = []
-        print(f"[OfflineExtractor] Processing {n_scenarios} scenarios...")
+        mode_str = "rollout" if rollout else "single-snapshot"
+        print(f"[OfflineExtractor] Processing {n_scenarios} scenarios ({mode_str} mode)...")
         
         for i, scenario_batch in enumerate(data_gen):
             if i >= n_scenarios:
                 break
             
-            # Keep the batch dimension for env.reset (it uses vmap)
             scenario = scenario_batch
-            
             print(f"\n  Scenario {i+1}/{n_scenarios}", end="")
             
             try:
-                # Reset env to properly initialize the state
-                env_transition = self.env.reset(scenario)
+                if rollout:
+                    # Multi-timestep rollout with expert log-replay
+                    result = self.run_episode(scenario, scenario_id=i)
+                    n_ts = result['n_timesteps']
+                    risk_vals = [ts['collision_risk'] for ts in result['timesteps']]
+                    max_risk = max(risk_vals) if risk_vals else 0.0
+                    print(f" ✓ ({n_ts} timesteps, max_risk={max_risk:.2f})")
+                else:
+                    # Legacy single-snapshot extraction
+                    env_transition = self.env.reset(scenario)
+                    obs = env_transition.observation
+                    reset_state = jax.tree_util.tree_map(
+                        lambda x: x.squeeze(0) if hasattr(x, 'squeeze') and x.ndim > 0 else x,
+                        env_transition.state
+                    )
+                    result = self.extract_scenario_with_obs(reset_state, obs, scenario_id=i)
+                    print(" ✓")
                 
-                # Use observation from EnvTransition (already computed during reset)
-                # This avoids the shape issues with calling env.observe again
-                obs = env_transition.observation
-                
-                # Squeeze state for semantic feature extraction
-                reset_state = jax.tree_util.tree_map(
-                    lambda x: x.squeeze(0) if hasattr(x, 'squeeze') and x.ndim > 0 else x,
-                    env_transition.state
-                )
-                
-                # Use pre-computed observation and squeezed state for extraction
-                result = self.extract_scenario_with_obs(reset_state, obs, scenario_id=i)
                 results.append(result)
-                print(" ✓")
             except Exception as e:
                 print(f" ✗ Error: {e}")
                 import traceback
@@ -649,7 +931,6 @@ class OfflineExtractor:
         # Save results
         os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
         
-        # Extract checkpoint step from filename
         checkpoint_step = self._parse_checkpoint_step(self.checkpoint_name)
         
         output_data = {
@@ -657,6 +938,7 @@ class OfflineExtractor:
             'step': checkpoint_step,
             'run_dir': self.run_dir,
             'n_scenarios': len(results),
+            'extraction_mode': 'rollout' if rollout else 'single_snapshot',
             'scenarios': results,
             'config': {
                 'encoder': self.config.get('encoder', {}),
@@ -729,6 +1011,12 @@ def main():
         default=42,
         help="Random seed for scenario sampling (default: 42)"
     )
+    parser.add_argument(
+        "--rollout",
+        action="store_true",
+        default=False,
+        help="Use multi-timestep rollout with expert log-replay (default: single-snapshot)"
+    )
     
     args = parser.parse_args()
     
@@ -759,7 +1047,7 @@ def main():
         output_path = os.path.join(args.output_dir, f"extraction_{checkpoint_base}.pkl")
         
         # Run extraction
-        extractor.run(n_scenarios=args.n_scenarios, output_path=output_path)
+        extractor.run(n_scenarios=args.n_scenarios, output_path=output_path, rollout=args.rollout)
     
     print(f"\n{'='*60}")
     print("Extraction complete!")

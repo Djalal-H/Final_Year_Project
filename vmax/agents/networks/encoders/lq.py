@@ -175,6 +175,7 @@ class LQEncoder(nn.Module):
     ff_dropout: float = 0.0
     tie_layer_weights: bool = False
     return_attention_weights: bool = False
+    attention_name: str = "lq_attention"
 
     @nn.compact
     def __call__(self, obs: jax.Array) -> jax.Array:
@@ -285,7 +286,7 @@ class LQEncoder(nn.Module):
             ff_dropout=self.ff_dropout,
             tie_layer_weights=self.tie_layer_weights,
             return_attention_weights=self.return_attention_weights,
-            name="lq_attention",
+            name=self.attention_name,
         )(input, mask)
         
         if self.return_attention_weights:
@@ -295,3 +296,14 @@ class LQEncoder(nn.Module):
         else:
             output_encoded = output.mean(axis=1)
             return output_encoded
+
+
+class PerceiverEncoder(LQEncoder):
+    """Perceiver encoder — identical to LQEncoder but with the original Flax module name.
+
+    Pretrained Perceiver checkpoints store parameters under 'perceiver_attention/'
+    instead of 'lq_attention/', so this subclass simply overrides the default name
+    to ensure parameter compatibility.
+    """
+
+    attention_name: str = "perceiver_attention"
