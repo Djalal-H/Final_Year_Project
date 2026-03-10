@@ -303,10 +303,7 @@ def _compute_diversity_loss(attn_weights: dict) -> jax.Array:
     attn = attn_weights[target_key]
     H = attn.shape[-1]
 
-    jax.debug.print(
-        "Div Loss -> attn shape (B, Q, K, H): {shape}",
-        shape=attn.shape,
-    )
+   
 
     # Per-query cosine similarity between all unique head pairs
     pair_losses = []
@@ -484,16 +481,7 @@ def _make_loss_fn(
             + lambda_safety * safety_loss
         )
 
-        # Debug print to verify computed terms
-        jax.debug.print(
-            "SAC Step -> Base: {base:.4f} | Div: {div:.4f} (x{ld}) | Safe: {safe:.4f} (x{ls}) | Total: {tot:.4f}",
-            base=original_policy_loss,
-            div=diversity_loss,
-            ld=lambda_diversity,
-            safe=safety_loss,
-            ls=lambda_safety,
-            tot=total_policy_loss,
-        )
+        
 
         metrics = {
             "policy_loss_base": original_policy_loss,
