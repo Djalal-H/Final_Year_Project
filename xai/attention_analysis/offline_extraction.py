@@ -42,7 +42,7 @@ from vmax.agents.learning.reinforcement.ppo import ppo_factory
 from vmax.agents.networks import network_utils
 from vmax.scripts.evaluate.utils import load_params, load_yaml_config
 
-# Import the ORIGINAL WayformerEncoder (it supports return_attention_weights=True)
+# WayformerEncoder always returns (output, attn_weights) tuple
 from vmax.agents.networks.encoders.wayformer import WayformerEncoder
 
 
@@ -130,11 +130,9 @@ class OfflineExtractor:
         encoder_cfg = network_utils.parse_config(self.config["encoder"], "encoder")
         encoder_cfg = network_utils.convert_to_dict_with_activation_fn(encoder_cfg)
         
-        # Use the ORIGINAL WayformerEncoder - it has return_attention_weights support
-        # and matches the trained model's layer structure
+        # WayformerEncoder always returns (output, attn_weights) tuple
         self.encoder = WayformerEncoder(
             unflatten_fn=unflatten_fn,
-            return_attention_weights=True,
             **encoder_cfg
         )
         print(f"[OfflineExtractor] Encoder: {self.encoder}")
@@ -572,7 +570,8 @@ class OfflineExtractor:
                 probs = attn_avg / total  # (n_tokens, n_heads)
                 
                 # Entropy per head: H = -sum(p * log(p))
-                log_probs = np.where(probs > 1e-10, np.log(probs), 0.0)
+                safe_probs = np.maximum(probs, 1e-10)
+                log_probs = np.log(safe_probs)
                 entropy = -(probs * log_probs).sum(axis=0)  # (n_heads,)
                 max_entropy = np.log(n_tokens)  # Maximum possible entropy
                 

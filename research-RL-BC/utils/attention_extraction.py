@@ -144,14 +144,12 @@ class OfflineExtractor:
             print(f"[OfflineExtractor] Using LQEncoder (Perceiver architecture)")
             self.encoder = LQEncoder(
                 unflatten_fn=unflatten_fn,
-                return_attention_weights=True,
                 **encoder_cfg
             )
         else:
             print(f"[OfflineExtractor] Using WayformerEncoder")
             self.encoder = WayformerEncoder(
                 unflatten_fn=unflatten_fn,
-                return_attention_weights=True,
                 **encoder_cfg
             )
         
