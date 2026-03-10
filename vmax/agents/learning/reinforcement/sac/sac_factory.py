@@ -266,10 +266,12 @@ def make_sgd_step(
 
 
 def _compute_diversity_loss(attn_weights: dict) -> jax.Array:
-    """Compute diversity loss to encourage different attention heads to attend differently.
+    """Compute diversity loss via per-query cosine similarity between head pairs.
 
-    Penalizes high cosine similarity between the attention distributions of different
-    heads in the cross-attention layer over other trajectories.
+    Each query row is an independent softmax-normalized distribution over K keys.
+    We compute cosine similarity along the K dimension for each query independently,
+    then average over queries and batch.  For H>2 heads we loop over all unique
+    pairs (i, j) where i < j.
 
     Args:
         attn_weights: Dictionary of attention weights from the encoder.
@@ -296,26 +298,31 @@ def _compute_diversity_loss(attn_weights: dict) -> jax.Array:
     if target_key is None:
         return jnp.float32(0.0)
 
-    # attn shape: [B, Q, K, H] (queries, keys, heads)
+    # attn shape: [B, Q, K, H]
+    # Q = num_latents (queries), K = num_tokens (keys), H = num_heads
     attn = attn_weights[target_key]
+    H = attn.shape[-1]
 
-    # Rearrange to [B, H, Q*K] — each head has a flattened attention distribution
-    B, Q, K, H = attn.shape
-    attn_flat = attn.transpose(0, 3, 1, 2).reshape(B, H, Q * K)  # [B, H, Q*K]
+    jax.debug.print(
+        "Div Loss -> attn shape (B, Q, K, H): {shape}",
+        shape=attn.shape,
+    )
 
-    # Normalize for cosine similarity: [B, H, Q*K]
-    norms = jnp.linalg.norm(attn_flat, axis=-1, keepdims=True) + 1e-8
-    attn_normalized = attn_flat / norms
+    # Per-query cosine similarity between all unique head pairs
+    pair_losses = []
+    for i in range(H):
+        for j in range(i + 1, H):
+            a_i = attn[..., i]  # (B, Q, K)
+            a_j = attn[..., j]  # (B, Q, K)
 
-    # Pairwise cosine similarity: [B, H, H]
-    cos_sim = jnp.einsum("bhi, bji -> bhj", attn_normalized, attn_normalized)
+            dot = (a_i * a_j).sum(axis=-1)                       # (B, Q)
+            norm_i = jnp.linalg.norm(a_i, axis=-1)               # (B, Q)
+            norm_j = jnp.linalg.norm(a_j, axis=-1)               # (B, Q)
+            cos_sim = dot / (norm_i * norm_j + 1e-8)              # (B, Q)
 
-    # Zero out diagonal (self-similarity = 1)
-    mask = 1.0 - jnp.eye(H)[None, :, :]  # [1, H, H]
-    off_diagonal = cos_sim * mask
+            pair_losses.append(jnp.mean(jnp.abs(cos_sim)))
 
-    # Sum absolute off-diagonal elements, average over batch
-    diversity_loss = jnp.mean(jnp.sum(jnp.abs(off_diagonal), axis=(-2, -1)))
+    diversity_loss = sum(pair_losses) / max(len(pair_losses), 1)
 
     return diversity_loss
 
@@ -460,12 +467,15 @@ def _make_loss_fn(
         # Diversity loss: penalize similar attention distributions across heads
         diversity_loss = _compute_diversity_loss(encoder_attn_weights)
 
-        # Safety loss: encourage safety head concentration
-        safety_loss = _compute_safety_loss(
-            encoder_attn_weights,
-            transitions.observation,
-            safety_head_index,
-        )
+        # Safety loss: encourage safety head concentration (gated — skip if disabled)
+        if lambda_safety > 0:
+            safety_loss = _compute_safety_loss(
+                encoder_attn_weights,
+                transitions.observation,
+                safety_head_index,
+            )
+        else:
+            safety_loss = jnp.float32(0.0)
 
         # Combined loss
         total_policy_loss = (
