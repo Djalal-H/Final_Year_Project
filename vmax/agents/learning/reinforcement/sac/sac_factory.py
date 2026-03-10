@@ -187,6 +187,7 @@ def make_sgd_step(
     lambda_diversity: float = 0.0,
     lambda_safety: float = 0.0,
     safety_head_index: int = 0,
+    unflatten_fn: callable = None,
 ) -> datatypes.LearningFunction:
     """Create the SGD step function for SAC.
 
@@ -198,6 +199,8 @@ def make_sgd_step(
         lambda_diversity: Weight for the attention head diversity loss.
         lambda_safety: Weight for the safety-grounded attention loss.
         safety_head_index: Index of the attention head to enforce safety alignment.
+        unflatten_fn: Function to unflatten observations into structured features.
+            Required when lambda_safety > 0 for TTC computation.
 
     Returns:
         A function that executes an SGD step.
@@ -210,6 +213,7 @@ def make_sgd_step(
         lambda_diversity=lambda_diversity,
         lambda_safety=lambda_safety,
         safety_head_index=safety_head_index,
+        unflatten_fn=unflatten_fn,
     )
 
     policy_update = networks.gradient_update_fn(policy_loss, sac_network.policy_optimizer, pmap_axis_name="batch", has_aux=True)
@@ -324,20 +328,105 @@ def _compute_diversity_loss(attn_weights: dict) -> jax.Array:
     return diversity_loss
 
 
+def _compute_ttc_target(
+    observation: jax.Array,
+    unflatten_fn: callable,
+) -> jax.Array:
+    """Compute TTC-based target attention distribution from the observation.
+
+    Constructs a probability distribution over agent tokens where weight is
+    inversely proportional to Time-To-Collision. Low TTC (imminent threat)
+    gets high weight.  All timestep tokens of the same vehicle share the
+    same weight.
+
+    Feature layout (after valid is stripped to masks):
+        0,1 = waypoints (x, y)   — ego-centric coordinates
+        2,3 = velocity  (vx, vy)
+        4   = yaw
+        5,6 = size (length, width)
+
+    Args:
+        observation: Flat observation tensor, shape (B, obs_dim).
+        unflatten_fn: The features extractor's unflatten_features function.
+
+    Returns:
+        target_dist: shape (B, n_vehicles * n_timesteps)
+            Probability distribution over agent tokens.
+
+    """
+    FEAT_X, FEAT_Y = 0, 1
+    FEAT_VX, FEAT_VY = 2, 3
+    TTC_HORIZON = 5.0
+    CLOSING_SPEED_THRESHOLD = 0.5
+
+    features, masks = unflatten_fn(observation)
+    other_traj = features[1]   # (B, n_vehicles, n_timesteps, n_feat)
+    other_mask = masks[1]      # (B, n_vehicles, n_timesteps) boolean
+
+    n_vehicles = other_traj.shape[-3]
+    n_timesteps = other_traj.shape[-2]
+
+    # Use latest timestep for TTC computation
+    latest = other_traj[:, :, -1, :]     # (B, n_vehicles, n_feat)
+
+    x  = latest[:, :, FEAT_X]            # (B, n_vehicles)
+    y  = latest[:, :, FEAT_Y]
+    vx = latest[:, :, FEAT_VX]
+    vy = latest[:, :, FEAT_VY]
+    valid = other_mask[:, :, -1]          # (B, n_vehicles)
+
+    # Ego is at origin in ego-centric coordinates
+    dist = jnp.sqrt(x**2 + y**2) + 1e-6  # (B, n_vehicles)
+
+    # Closing speed: rate at which distance decreases
+    closing_speed = -(x * vx + y * vy) / dist  # (B, n_vehicles)
+
+    # TTC: time until collision (capped at horizon)
+    ttc = jnp.where(
+        closing_speed > CLOSING_SPEED_THRESHOLD,
+        dist / (closing_speed + 1e-6),
+        TTC_HORIZON,
+    )
+    ttc = jnp.clip(ttc, 0.0, TTC_HORIZON)      # (B, n_vehicles)
+
+    # Inverse TTC as attention target weight
+    weights = 1.0 / (ttc + 0.1)                 # (B, n_vehicles)
+
+    # Zero out invalid vehicles
+    weights = jnp.where(valid, weights, 0.0)
+
+    # Expand to match token dimension: each vehicle has n_timesteps tokens
+    # All timestep tokens of the same vehicle get the same weight
+    weights_expanded = jnp.repeat(weights[:, :, None], n_timesteps, axis=-1)
+    weights_flat = weights_expanded.reshape(weights.shape[0], n_vehicles * n_timesteps)
+
+    # Normalize to probability distribution
+    target_dist = weights_flat / (weights_flat.sum(axis=-1, keepdims=True) + 1e-8)
+
+    return target_dist
+
+
 def _compute_safety_loss(
     attn_weights: dict,
-    observations: jax.Array,
+    observation: jax.Array,
     safety_head_index: int,
+    unflatten_fn: callable,
 ) -> jax.Array:
-    """Compute safety loss to align a specific head with inverse distance risk.
+    """Compute KL-divergence safety loss between TTC target and actual attention.
 
-    Forces the designated safety head to distribute its attention proportional
-    to the inverse Euclidean distance of each agent (closer = more attention).
+    For the designated safety head, computes D_KL(target || actual) per query,
+    then averages over queries and batch.  The target distribution is derived
+    from inverse TTC computed from the ego-centric observation features.
+
+    Direction: D_KL(target || actual) penalizes the model when actual attention
+    assigns low probability to tokens the target says are important (same
+    direction as knowledge distillation).
 
     Args:
         attn_weights: Dictionary of attention weights from the encoder.
-        observations: Raw observation tensor [B, obs_dim].
-        safety_head_index: Index of the head to enforce safety alignment.
+        observation: Raw observation tensor [B, obs_dim].
+        safety_head_index: Index of the head designated as the safety head.
+        unflatten_fn: Function to unflatten observations into structured features.
 
     Returns:
         Scalar safety loss value.
@@ -355,43 +444,24 @@ def _compute_safety_loss(
 
     # attn shape: [B, Q, K, H]
     attn = attn_weights[target_key]
-    B, Q, K, H = attn.shape
 
     # Extract safety head attention: [B, Q, K]
-    safety_attn = attn[:, :, :, safety_head_index]
+    # Each query row is already softmax-normalized over K
+    p_actual = attn[:, :, :, safety_head_index]
 
-    # Reduce over the query dimension to get per-agent attention: [B, K]
-    safety_attn_per_agent = jnp.mean(safety_attn, axis=1)
+    # Compute TTC-based target distribution: [B, K]
+    p_target = _compute_ttc_target(observation, unflatten_fn)
 
-    # The K dimension represents num_agents * timesteps (from the rearrange in wayformer).
-    # We need to approximate per-agent distance from the flattened observation.
-    # The cross-attention keys correspond to the other_traj tokens which are
-    # (num_agents * timesteps) tokens. We compute risk from the attention
-    # distribution directly — using the L2 norm of the attention as a proxy.
-    #
-    # For ground-truth risk, we use the attention key positions themselves.
-    # Since the keys are embeddings (not raw features), we approximate risk
-    # by computing the inverse of the L1 norm of the per-agent attention
-    # distribution spread. Actually, we should just normalize the attention
-    # and the risk vector and compute MSE.
-    #
-    # However, we don't have direct access to raw agent positions here.
-    # Instead, we'll use a simpler formulation: encourage the safety head
-    # to have a non-uniform (concentrated) attention distribution.
-    # This effectively turns the safety loss into a "concentration" loss
-    # that pushes the safety head to specialize on specific agents.
+    # Expand target for broadcasting: [B, 1, K]
+    p_target = p_target[:, None, :]
 
-    # Compute risk proxy: use entropy of attention as concentration measure
-    # Low entropy = concentrated = good for a "safety radar" head
-    # We minimize entropy to encourage concentration
+    # KL divergence: D_KL(target || actual)
+    # = sum_k  p_target_k * log(p_target_k / p_actual_k)
     eps = 1e-8
-    safety_attn_normalized = safety_attn_per_agent / (jnp.sum(safety_attn_per_agent, axis=-1, keepdims=True) + eps)
-    entropy = -jnp.sum(safety_attn_normalized * jnp.log(safety_attn_normalized + eps), axis=-1)
+    kl = p_target * (jnp.log(p_target + eps) - jnp.log(p_actual + eps))
+    kl = kl.sum(axis=-1)   # sum over tokens K -> (B, Q)
 
-    # Average entropy across the batch
-    safety_loss = jnp.mean(entropy)
-
-    return safety_loss
+    return jnp.mean(kl)    # mean over batch and queries
 
 
 def _make_loss_fn(
@@ -401,6 +471,7 @@ def _make_loss_fn(
     lambda_diversity: float = 0.0,
     lambda_safety: float = 0.0,
     safety_head_index: int = 0,
+    unflatten_fn: callable = None,
 ) -> tuple[callable, callable]:
     """Define the loss functions for SAC.
 
@@ -411,6 +482,8 @@ def _make_loss_fn(
         lambda_diversity: Weight for the attention head diversity loss.
         lambda_safety: Weight for the safety-grounded attention loss.
         safety_head_index: Index of the attention head to enforce safety alignment.
+        unflatten_fn: Function to unflatten observations into structured features.
+            Required when lambda_safety > 0 for TTC computation.
 
     Returns:
         A tuple containing the value loss and policy loss functions.
@@ -464,12 +537,13 @@ def _make_loss_fn(
         # Diversity loss: penalize similar attention distributions across heads
         diversity_loss = _compute_diversity_loss(encoder_attn_weights)
 
-        # Safety loss: encourage safety head concentration (gated — skip if disabled)
+        # Safety loss: KL-divergence against TTC target (gated — skip if disabled)
         if lambda_safety > 0:
             safety_loss = _compute_safety_loss(
                 encoder_attn_weights,
                 transitions.observation,
                 safety_head_index,
+                unflatten_fn,
             )
         else:
             safety_loss = jnp.float32(0.0)

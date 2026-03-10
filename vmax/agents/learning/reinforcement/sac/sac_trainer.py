@@ -122,6 +122,7 @@ def train(
         lambda_diversity=lambda_diversity,
         lambda_safety=lambda_safety,
         safety_head_index=safety_head_index,
+        unflatten_fn=env.get_wrapper_attr("features_extractor").unflatten_features,
     )
     step_fn = partial(inference.policy_step, use_partial_transition=True)
 
