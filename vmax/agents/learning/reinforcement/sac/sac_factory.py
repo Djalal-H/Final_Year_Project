@@ -187,6 +187,8 @@ def make_sgd_step(
     lambda_diversity: float = 0.0,
     lambda_safety: float = 0.0,
     safety_head_index: int = 0,
+    lambda_consistency: float = 0.0,
+    safety_tau: float = 0.5,
     unflatten_fn: callable = None,
 ) -> datatypes.LearningFunction:
     """Create the SGD step function for SAC.
@@ -199,6 +201,8 @@ def make_sgd_step(
         lambda_diversity: Weight for the attention head diversity loss.
         lambda_safety: Weight for the safety-grounded attention loss.
         safety_head_index: Index of the attention head to enforce safety alignment.
+        lambda_consistency: Weight for the within-head consistency loss.
+        safety_tau: Temperature for exponential TTC target distribution.
         unflatten_fn: Function to unflatten observations into structured features.
             Required when lambda_safety > 0 for TTC computation.
 
@@ -213,6 +217,8 @@ def make_sgd_step(
         lambda_diversity=lambda_diversity,
         lambda_safety=lambda_safety,
         safety_head_index=safety_head_index,
+        lambda_consistency=lambda_consistency,
+        safety_tau=safety_tau,
         unflatten_fn=unflatten_fn,
     )
 
@@ -328,16 +334,79 @@ def _compute_diversity_loss(attn_weights: dict) -> jax.Array:
     return diversity_loss
 
 
+def _compute_consistency_loss(attn_weights: dict) -> jax.Array:
+    """Compute within-head consistency loss via pairwise cosine similarity across queries.
+
+    For each head, compute cosine similarity between all query pairs along the K
+    dimension, then maximize it (minimize 1 - cos_sim).  This encourages all
+    queries within a head to attend to similar tokens — the opposite of diversity.
+
+    Args:
+        attn_weights: Dictionary of attention weights from the encoder.
+
+    Returns:
+        Scalar consistency loss value in [0, 1].
+
+    """
+    # Find other_traj cross-attention key
+    target_key = None
+    for key in attn_weights:
+        if "other_traj" in key and "cross_attn" in key:
+            target_key = key
+            break
+
+    if target_key is None:
+        for key in attn_weights:
+            if "cross_attn" in key:
+                target_key = key
+                break
+
+    if target_key is None:
+        return jnp.float32(0.0)
+
+    # attn shape: [B, Q, K, H]
+    attn = attn_weights[target_key]
+    H = attn.shape[-1]
+    Q = attn.shape[1]
+
+    head_losses = []
+    for h in range(H):
+        a_h = attn[..., h]  # (B, Q, K)
+
+        pair_sims = []
+        for i in range(Q):
+            for j in range(i + 1, Q):
+                q_i = a_h[:, i, :]  # (B, K)
+                q_j = a_h[:, j, :]  # (B, K)
+
+                dot = (q_i * q_j).sum(axis=-1)            # (B,)
+                norm_i = jnp.linalg.norm(q_i, axis=-1)    # (B,)
+                norm_j = jnp.linalg.norm(q_j, axis=-1)    # (B,)
+                cos_sim = dot / (norm_i * norm_j + 1e-8)   # (B,)
+
+                pair_sims.append(jnp.mean(cos_sim))
+
+        # Consistency = 1 - mean(cos_sim): minimize to maximize agreement
+        mean_sim = sum(pair_sims) / max(len(pair_sims), 1)
+        head_losses.append(1.0 - mean_sim)
+
+    consistency_loss = sum(head_losses) / max(len(head_losses), 1)
+    return consistency_loss
+
+
 def _compute_ttc_target(
     observation: jax.Array,
     unflatten_fn: callable,
-) -> jax.Array:
+    safety_tau: float = 0.5,
+) -> tuple[jax.Array, jax.Array]:
     """Compute TTC-based target attention distribution from the observation.
 
     Constructs a probability distribution over agent tokens where weight is
-    inversely proportional to Time-To-Collision. Low TTC (imminent threat)
+    exponentially decaying with TTC: exp(-ttc / tau).  Low TTC (imminent threat)
     gets high weight.  All timestep tokens of the same vehicle share the
     same weight.
+
+    Also computes scene-level collision risk R for safety loss gating.
 
     Feature layout (after valid is stripped to masks):
         0,1 = waypoints (x, y)   — ego-centric coordinates
@@ -348,10 +417,13 @@ def _compute_ttc_target(
     Args:
         observation: Flat observation tensor, shape (B, obs_dim).
         unflatten_fn: The features extractor's unflatten_features function.
+        safety_tau: Temperature for exponential weighting (default 0.5).
 
     Returns:
         target_dist: shape (B, n_vehicles * n_timesteps)
             Probability distribution over agent tokens.
+        scene_risk: shape (B,)
+            Scene-level risk R = clip(1 - min_ttc / 3, 0, 1).
 
     """
     FEAT_X, FEAT_Y = 0, 1
@@ -389,11 +461,17 @@ def _compute_ttc_target(
     )
     ttc = jnp.clip(ttc, 0.0, TTC_HORIZON)      # (B, n_vehicles)
 
-    # Inverse TTC as attention target weight
-    weights = 1.0 / (ttc + 0.1)                 # (B, n_vehicles)
+    # Exponential TTC target weight: exp(-ttc / tau)
+    weights = jnp.exp(-ttc / safety_tau)         # (B, n_vehicles)
 
     # Zero out invalid vehicles
     weights = jnp.where(valid, weights, 0.0)
+
+    # Scene-level risk: R = clip(1 - min_ttc / 3, 0, 1)
+    # Use only valid vehicles; invalid get TTC_HORIZON
+    ttc_for_risk = jnp.where(valid, ttc, TTC_HORIZON)
+    min_ttc = jnp.min(ttc_for_risk, axis=-1)     # (B,)
+    scene_risk = jnp.clip(1.0 - min_ttc / 3.0, 0.0, 1.0)  # (B,)
 
     # Expand to match token dimension: each vehicle has n_timesteps tokens
     # All timestep tokens of the same vehicle get the same weight
@@ -403,7 +481,7 @@ def _compute_ttc_target(
     # Normalize to probability distribution
     target_dist = weights_flat / (weights_flat.sum(axis=-1, keepdims=True) + 1e-8)
 
-    return target_dist
+    return target_dist, scene_risk
 
 
 def _compute_safety_loss(
@@ -411,12 +489,13 @@ def _compute_safety_loss(
     observation: jax.Array,
     safety_head_index: int,
     unflatten_fn: callable,
-) -> jax.Array:
+    safety_tau: float = 0.5,
+) -> tuple[jax.Array, jax.Array]:
     """Compute KL-divergence safety loss between TTC target and actual attention.
 
     For the designated safety head, computes D_KL(target || actual) per query,
-    then averages over queries and batch.  The target distribution is derived
-    from inverse TTC computed from the ego-centric observation features.
+    then averages over queries and batch.  The target distribution uses
+    exponential TTC weighting: exp(-ttc / tau).
 
     Direction: D_KL(target || actual) penalizes the model when actual attention
     assigns low probability to tokens the target says are important (same
@@ -427,9 +506,10 @@ def _compute_safety_loss(
         observation: Raw observation tensor [B, obs_dim].
         safety_head_index: Index of the head designated as the safety head.
         unflatten_fn: Function to unflatten observations into structured features.
+        safety_tau: Temperature for exponential TTC target.
 
     Returns:
-        Scalar safety loss value.
+        Tuple of (safety_loss, scene_risk) where scene_risk is (B,).
 
     """
     # Find other_traj cross-attention key
@@ -440,7 +520,7 @@ def _compute_safety_loss(
             break
 
     if target_key is None:
-        return jnp.float32(0.0)
+        return jnp.float32(0.0), jnp.float32(0.0)
 
     # attn shape: [B, Q, K, H]
     attn = attn_weights[target_key]
@@ -449,8 +529,8 @@ def _compute_safety_loss(
     # Each query row is already softmax-normalized over K
     p_actual = attn[:, :, :, safety_head_index]
 
-    # Compute TTC-based target distribution: [B, K]
-    p_target = _compute_ttc_target(observation, unflatten_fn)
+    # Compute TTC-based target distribution and scene risk
+    p_target, scene_risk = _compute_ttc_target(observation, unflatten_fn, safety_tau=safety_tau)
 
     # Expand target for broadcasting: [B, 1, K]
     p_target = p_target[:, None, :]
@@ -461,7 +541,7 @@ def _compute_safety_loss(
     kl = p_target * (jnp.log(p_target + eps) - jnp.log(p_actual + eps))
     kl = kl.sum(axis=-1)   # sum over tokens K -> (B, Q)
 
-    return jnp.mean(kl)    # mean over batch and queries
+    return jnp.mean(kl), scene_risk    # mean over batch and queries
 
 
 def _make_loss_fn(
@@ -471,6 +551,8 @@ def _make_loss_fn(
     lambda_diversity: float = 0.0,
     lambda_safety: float = 0.0,
     safety_head_index: int = 0,
+    lambda_consistency: float = 0.0,
+    safety_tau: float = 0.5,
     unflatten_fn: callable = None,
 ) -> tuple[callable, callable]:
     """Define the loss functions for SAC.
@@ -482,6 +564,8 @@ def _make_loss_fn(
         lambda_diversity: Weight for the attention head diversity loss.
         lambda_safety: Weight for the safety-grounded attention loss.
         safety_head_index: Index of the attention head to enforce safety alignment.
+        lambda_consistency: Weight for the within-head consistency loss.
+        safety_tau: Temperature for exponential TTC target distribution.
         unflatten_fn: Function to unflatten observations into structured features.
             Required when lambda_safety > 0 for TTC computation.
 
@@ -537,30 +621,44 @@ def _make_loss_fn(
         # Diversity loss: penalize similar attention distributions across heads
         diversity_loss = _compute_diversity_loss(encoder_attn_weights)
 
-        # Safety loss: KL-divergence against TTC target (gated — skip if disabled)
+        # Consistency loss: encourage within-head query agreement
+        consistency_loss = _compute_consistency_loss(encoder_attn_weights)
+
+        # Safety loss: KL-divergence against exponential TTC target
+        # Gated on scene-level risk R > 0.2
         if lambda_safety > 0:
-            safety_loss = _compute_safety_loss(
+            safety_loss_raw, scene_risk = _compute_safety_loss(
                 encoder_attn_weights,
                 transitions.observation,
                 safety_head_index,
                 unflatten_fn,
+                safety_tau=safety_tau,
             )
+            # Gate on risk: only apply when R > 0.2, stop_gradient on gate
+            risk_gate = jax.lax.stop_gradient((scene_risk > 0.2).astype(jnp.float32))
+            safety_loss = safety_loss_raw * jnp.mean(risk_gate)
         else:
+            safety_loss_raw = jnp.float32(0.0)
             safety_loss = jnp.float32(0.0)
+            scene_risk = jnp.float32(0.0)
+            risk_gate = jnp.float32(0.0)
 
         # Combined loss
         total_policy_loss = (
             original_policy_loss
             + lambda_diversity * diversity_loss
+            + lambda_consistency * consistency_loss
             + lambda_safety * safety_loss
         )
-
-        
 
         metrics = {
             "policy_loss_base": original_policy_loss,
             "diversity_loss": diversity_loss,
+            "consistency_loss": consistency_loss,
             "safety_loss": safety_loss,
+            "safety_loss_ungated": safety_loss_raw,
+            "risk_gate_frac": jnp.mean(risk_gate),
+            "scene_risk_mean": jnp.mean(scene_risk),
             "policy_loss_total": total_policy_loss,
         }
 

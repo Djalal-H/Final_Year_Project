@@ -56,6 +56,8 @@ def train(
     lambda_diversity: float = 0.0,
     lambda_safety: float = 0.0,
     safety_head_index: int = 0,
+    lambda_consistency: float = 0.0,
+    safety_tau: float = 0.5,
 ) -> None:
     """Train a SAC agent.
 
@@ -88,6 +90,8 @@ def train(
         lambda_diversity: Weight for attention head diversity loss.
         lambda_safety: Weight for safety-grounded attention loss.
         safety_head_index: Index of the attention head for safety alignment.
+        lambda_consistency: Weight for within-head consistency loss.
+        safety_tau: Temperature for exponential TTC target distribution.
 
     """
     print(" SAC ".center(40, "="))
@@ -122,6 +126,8 @@ def train(
         lambda_diversity=lambda_diversity,
         lambda_safety=lambda_safety,
         safety_head_index=safety_head_index,
+        lambda_consistency=lambda_consistency,
+        safety_tau=safety_tau,
         unflatten_fn=env.get_wrapper_attr("features_extractor").unflatten_features,
     )
     step_fn = partial(inference.policy_step, use_partial_transition=True)

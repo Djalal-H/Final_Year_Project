@@ -15,8 +15,10 @@ learning_start: 100
 
 # Forced Attention Specialization
 lambda_diversity: 0.05
-lambda_safety: 0.005
+lambda_safety: 0.05
 safety_head_index: 0
+lambda_consistency: 0.05
+safety_tau: 0.5
 
 network:
   policy:
