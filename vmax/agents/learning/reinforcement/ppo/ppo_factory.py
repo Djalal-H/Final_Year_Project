@@ -109,17 +109,17 @@ def make_inference_fn(ppo_networks: PPONetworks) -> datatypes.Policy:
         parametric_action_distribution = ppo_networks.parametric_action_distribution
 
         def policy(observations: jax.Array, key_sample: jax.Array = None) -> tuple[jax.Array, dict]:
-            logits, _ = policy_network.apply(params, observations)
+            logits, encoder_attn_weights = policy_network.apply(params, observations)
 
             if deterministic:
-                return parametric_action_distribution.mode(logits), {}
+                return parametric_action_distribution.mode(logits), {"encoder_attn_weights": encoder_attn_weights}
 
             raw_actions = parametric_action_distribution.sample_no_postprocessing(logits, key_sample)
 
             log_prob = parametric_action_distribution.log_prob(logits, raw_actions)
             postprocessed_actions = parametric_action_distribution.postprocess(raw_actions)
 
-            return postprocessed_actions, {"log_prob": log_prob, "raw_action": raw_actions}
+            return postprocessed_actions, {"log_prob": log_prob, "raw_action": raw_actions, "encoder_attn_weights": encoder_attn_weights}
 
         return policy
 

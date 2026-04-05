@@ -149,12 +149,18 @@ class CounterfactualExplainer:
     different action perturbations, then classifies outcomes.
     """
     
-    def __init__(self, config: Optional[CounterfactualConfig] = None):
+    def __init__(self, config: Optional[CounterfactualConfig] = None,
+                 action_grid: Optional[List[Dict[str, Any]]] = None):
         """
         Initialize the explainer with a set of action perturbations.
+        
+        Args:
+            config: Rollout configuration.
+            action_grid: Optional external action grid (from AdaptiveActionGrid).
+                         If None, falls back to the default fixed 3x3 grid.
         """
         self.config = config or CounterfactualConfig()
-        self.action_grid = self._build_action_grid()
+        self.action_grid = action_grid if action_grid is not None else self._build_action_grid()
         
         # Performance Cache: Pre-instantiate metrics
         self._overlap_metric = waymax_metrics.OverlapMetric()
@@ -163,6 +169,14 @@ class CounterfactualExplainer:
         # Performance Cache: JIT kernel
         # We'll initialize this on the first run of explain_vectorized
         self._jitted_rollout_kernel = None
+    
+    def set_action_grid(self, action_grid: List[Dict[str, Any]]):
+        """Replace the action grid dynamically (e.g. from AdaptiveActionGrid).
+        
+        NOTE: Invalidates the JIT cache since grid size may have changed.
+        """
+        self.action_grid = action_grid
+        self._jitted_rollout_kernel = None  # Force recompilation
     
     def _ensure_batch_dim(self, tree):
         """Ensures all leaves in the tree have at least one batch dimension."""
@@ -376,45 +390,49 @@ class CounterfactualExplainer:
             base_env = base_env.env
         
         # 5. Execute in parallel using cached JIT kernel
-        # We pass the step function as a static argument or ensure it's jittable
-        # For Waymax, base_env.step is usually stable for a given class
         if self._jitted_rollout_kernel is None:
             self._jitted_rollout_kernel = self._create_rollout_kernel(base_env.step)
-        
-        # Run parallel rollouts
-        coll_mask, offroad_mask, coll_steps = self._jitted_rollout_kernel(
-            batched_state, 
-            batched_actions, 
+
+        # Run parallel rollouts — now returns 4 tensors
+        coll_mask, offroad_mask, coll_steps, threat_ids = self._jitted_rollout_kernel(
+            batched_state,
+            batched_actions,
             sdc_idx
         )
-        
+
         # 6. Post-process results
         alternatives = []
         chosen_action = None
-        
-        # Convert to numpy for faster iteration
+
+        # Device-get once for fast per-element access
         coll_mask_np = np.array(coll_mask)
         offroad_mask_np = np.array(offroad_mask)
         coll_steps_np = np.array(coll_steps)
-        
+        threat_ids_np = np.array(threat_ids)
+
         for idx, action_cfg in enumerate(self.action_grid):
             if coll_mask_np[idx]:
                 outcome = "COLLISION"
-                ttc = (int(coll_steps_np[idx]) + 1) * 0.1
+                min_ttc = round((int(coll_steps_np[idx]) + 1) * 0.1, 2)
+                # -1 sentinel means no valid agent found (shouldn't happen)
+                raw_id = int(threat_ids_np[idx])
+                threat_agent_id = raw_id if raw_id >= 0 else None
             elif offroad_mask_np[idx]:
                 outcome = "OFFROAD"
-                ttc = None
+                min_ttc = None
+                threat_agent_id = None
             else:
                 outcome = "SAFE"
-                ttc = None
-                
+                min_ttc = None
+                threat_agent_id = None
+
             entry = {
                 "label": action_cfg["label"],
                 "accel": action_cfg["accel"],
                 "steer": action_cfg["steer"],
                 "outcome": outcome,
-                "ttc": ttc,
-                "collision_id": None
+                "min_ttc": min_ttc,
+                "threat_agent_id": threat_agent_id,
             }
             
             if idx == chosen_action_idx:
@@ -433,28 +451,39 @@ class CounterfactualExplainer:
         """
         def single_rollout(initial_state, action, sdc_idx):
             curr_state = initial_state
-            collision_occurred = False
+            collision_occurred = jnp.array(False)
             first_collision_step = jnp.array(self.config.horizon_steps, dtype=jnp.int32)
-            offroad_occurred = False
-            
-            # Using loop for JIT unrolling or static loop
+            # -1 sentinel: no threat agent yet
+            threat_agent_id = jnp.array(-1, dtype=jnp.int32)
+            offroad_occurred = jnp.array(False)
+
             for step in range(self.config.horizon_steps):
                 curr_state = step_fn(curr_state, action)
-                
-                # Check collision (pre-instantiated metrics are captured here)
+
+                # --- Collision check ---
+                # overlap_val shape: (num_objects,)
+                # 1.0 where object i overlaps ANY other object
                 overlap_val = self._overlap_metric.compute(curr_state).value
-                has_coll = overlap_val[sdc_idx] > 0
-                
-                # Update collision info
-                first_collision_step = jnp.where(has_coll & ~collision_occurred, step, first_collision_step)
-                collision_occurred = collision_occurred | has_coll
-                
-                # Check offroad
+                sdc_overlap = overlap_val[sdc_idx] > 0
+
+                # Identify which agent caused the collision:
+                # Zero-out the SDC's own slot so argmax picks another object.
+                # The highest-overlap value after excluding SDC is the threat.
+                overlap_excl_sdc = overlap_val.at[sdc_idx].set(0.0)
+                candidate_id = jnp.argmax(overlap_excl_sdc).astype(jnp.int32)
+
+                # Only record on the first collision step
+                is_first_coll = sdc_overlap & ~collision_occurred
+                first_collision_step = jnp.where(is_first_coll, step, first_collision_step)
+                threat_agent_id = jnp.where(is_first_coll, candidate_id, threat_agent_id)
+                collision_occurred = collision_occurred | sdc_overlap
+
+                # --- Offroad check ---
                 offroad_val = self._offroad_metric.compute(curr_state).value
                 has_offroad = offroad_val[sdc_idx] > 0
                 offroad_occurred = offroad_occurred | has_offroad
-                
-            return collision_occurred, offroad_occurred, first_collision_step
+
+            return collision_occurred, offroad_occurred, first_collision_step, threat_agent_id
 
         # Return a jitted, vmapped version of the single rollout
         return jax.jit(jax.vmap(single_rollout, in_axes=(0, 0, None)))

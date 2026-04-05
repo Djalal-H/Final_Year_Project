@@ -118,12 +118,12 @@ def make_inference_fn(sac_network: SACNetworks) -> datatypes.Policy:
         parametric_action_distribution = sac_network.parametric_action_distribution
 
         def policy(observations: jax.Array, key_sample: jax.Array = None) -> tuple[jax.Array, dict]:
-            logits, _ = policy_network.apply(params, observations)
+            logits, encoder_attn_weights = policy_network.apply(params, observations)
 
             if deterministic:
-                return parametric_action_distribution.mode(logits), {}
+                return parametric_action_distribution.mode(logits), {"encoder_attn_weights": encoder_attn_weights}
 
-            return parametric_action_distribution.sample(logits, key_sample), {}
+            return parametric_action_distribution.sample(logits, key_sample), {"encoder_attn_weights": encoder_attn_weights}
 
         return policy
 

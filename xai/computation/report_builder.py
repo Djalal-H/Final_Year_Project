@@ -1,0 +1,102 @@
+# Copyright 2025 - Report Builder for Attention-Grounded XRL Pipeline
+"""
+Module 8: ReportBuilder
+
+Assembles outputs from all computation-layer modules into a structured
+JSON report and persists it to disk.  This is the **output interface**
+of the computation layer.
+"""
+
+import json
+import os
+from typing import Any, Dict, List, Optional
+
+
+def build(
+    step: int,
+    timestamp_s: float,
+    ego_state: Dict[str, Any],
+    chosen_action: Dict[str, Any],
+    context_categories: List[str],
+    alternatives: List[Dict[str, Any]],
+    necessity_score: float,
+    attention_grounding: Dict[str, Any],
+    decision_class: str,
+) -> Dict[str, Any]:
+    """
+    Assemble a structured report from all computation-layer outputs.
+
+    Args:
+        step: Simulation step index.
+        timestamp_s: Timestamp in seconds.
+        ego_state: ``{ego_velocity, ego_action}`` from SemanticGraphBuilder.
+        chosen_action: ``{label, accel, steer, outcome, ...}`` for the
+            agent's actual action.
+        context_categories: Active scene labels.
+        alternatives: List of alternative rollout outcomes.
+        necessity_score: Float in [0, 1].
+        attention_grounding: ``{grounding_score, per_agent_breakdown}``
+            from AttentionGrounder.
+        decision_class: One of the four class labels.
+
+    Returns:
+        Validated report dictionary.
+
+    Raises:
+        ValueError: If any required field is missing or malformed.
+    """
+    # --- Validation ---
+    if decision_class not in (
+        "GROUNDED_CRITICAL",
+        "UNGROUNDED_CRITICAL",
+        "GROUNDED_ROUTINE",
+        "ROUTINE",
+    ):
+        raise ValueError(f"Invalid decision_class: {decision_class}")
+
+    if not isinstance(alternatives, list):
+        raise ValueError("alternatives must be a list")
+
+    report = {
+        "step": step,
+        "timestamp_s": round(timestamp_s, 2),
+        "ego_state": ego_state,
+        "chosen_action": chosen_action,
+        "context_categories": context_categories,
+        "alternatives": alternatives,
+        "necessity_score": round(necessity_score, 4),
+        "attention_grounding": attention_grounding,
+        "decision_class": decision_class,
+    }
+
+    return report
+
+
+def save(
+    report: Dict[str, Any],
+    output_dir: str,
+    scenario_id: str,
+    step: int,
+) -> str:
+    """
+    Persist a report to disk as JSON.
+
+    Args:
+        report: Report dict from :func:`build`.
+        output_dir: Directory to write into.
+        scenario_id: Scenario identifier string.
+        step: Step index (used in filename).
+
+    Returns:
+        Absolute path to the written file.
+    """
+    reports_dir = os.path.join(output_dir, "reports")
+    os.makedirs(reports_dir, exist_ok=True)
+
+    filename = f"report_{scenario_id}_step_{step:04d}.json"
+    path = os.path.join(reports_dir, filename)
+
+    with open(path, "w") as f:
+        json.dump(report, f, indent=2, default=str)
+
+    return path

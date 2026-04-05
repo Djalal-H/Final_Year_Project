@@ -101,9 +101,9 @@ def make_inference_fn(bc_network: BCNetwork) -> datatypes.Policy:
         policy_network = bc_network.policy_network
 
         def policy(observations: jax.Array, key_sample: jax.Array = None) -> jax.Array:
-            logits, _ = policy_network.apply(params, observations)
+            logits, encoder_attn_weights = policy_network.apply(params, observations)
 
-            return logits, {}
+            return logits, {"encoder_attn_weights": encoder_attn_weights}
 
         return policy
 
