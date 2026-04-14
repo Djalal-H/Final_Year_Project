@@ -55,12 +55,11 @@ action_templates:
 
 # Narration / LLM settings
 llm:
-  provider: "openrouter"
-  base_url: "https://openrouter.ai/api/v1/chat/completions"
-  model: "qwen/qwen3-4b"
+  provider: "groq"
+  base_url: "https://api.groq.com/openai/v1/chat/completions"
+  model: "llama-3.1-8b-instant"
   max_tokens: 256
-  api_key_env: "OPENROUTER_API_KEY" # read from this env var at runtime
+  api_key_env: "GROQ_API_KEY"
 
-narration_mode:
-  "offline" # "offline" = save reports first, narrate later
-  # "online"  = narrate during eval loop
+narration_mode: "offline" # "offline" = save reports first, narrate later
+# "online"  = narrate during eval loop

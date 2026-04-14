@@ -49,11 +49,18 @@ def compute(
     attn = np.asarray(attn)
 
     # Handle batch dimension: use first sample if batched
-    # Expected: [B, N_heads, N_latents, N_tokens] or [N_heads, N_latents, N_tokens]
     if attn.ndim == 4:
-        attn = attn[0]  # → [N_heads, N_latents, N_tokens]
+        attn = attn[0]  # → 3D
+
+    # Normalize axis order to [N_heads, N_latents, N_tokens].
+    # LQEncoder returns [N_latents, N_tokens, N_heads] where N_tokens is
+    # the largest dimension (input token count).  Detect and transpose.
+    if attn.ndim == 3 and attn.shape[2] < attn.shape[1]:
+        # Current: [N_latents, N_tokens, N_heads] → target: [N_heads, N_latents, N_tokens]
+        attn = attn.transpose(2, 0, 1)
 
     # 2. Aggregate across heads and latents → per-token attention mass
+    # Shape after transpose: [N_heads, N_latents, N_tokens]
     # Sum over heads (axis 0) and latents (axis 1) → [N_tokens]
     per_token_mass = attn.sum(axis=(0, 1))
 

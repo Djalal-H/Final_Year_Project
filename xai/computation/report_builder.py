@@ -18,6 +18,7 @@ def build(
     ego_state: Dict[str, Any],
     chosen_action: Dict[str, Any],
     context_categories: List[str],
+    scene_edges: List[Dict[str, Any]],
     alternatives: List[Dict[str, Any]],
     necessity_score: float,
     attention_grounding: Dict[str, Any],
@@ -33,6 +34,7 @@ def build(
         chosen_action: ``{label, accel, steer, outcome, ...}`` for the
             agent's actual action.
         context_categories: Active scene labels.
+        scene_edges: List of semantic edges from SemanticGraphBuilder.
         alternatives: List of alternative rollout outcomes.
         necessity_score: Float in [0, 1].
         attention_grounding: ``{grounding_score, per_agent_breakdown}``
@@ -57,12 +59,24 @@ def build(
     if not isinstance(alternatives, list):
         raise ValueError("alternatives must be a list")
 
+    # Keep only the 5 closest agents for the LLM prompt to avoid context bloating
+    closest_edges = sorted(scene_edges, key=lambda e: e.get("raw_distance", 999.0))[:5]
+    scene_description = []
+    for e in closest_edges:
+        scene_description.append({
+            "agent_id": e["target_id"],
+            "distance": round(e.get("raw_distance", 0.0), 1),
+            "relations": e.get("relation", []),
+            "ttc": round(e.get("ttc"), 2) if e.get("ttc") is not None else None
+        })
+
     report = {
         "step": step,
         "timestamp_s": round(timestamp_s, 2),
         "ego_state": ego_state,
         "chosen_action": chosen_action,
         "context_categories": context_categories,
+        "scene_description": scene_description,
         "alternatives": alternatives,
         "necessity_score": round(necessity_score, 4),
         "attention_grounding": attention_grounding,

@@ -10,8 +10,7 @@ import json
 import os
 from typing import Any, Dict, Optional
 
-import urllib.request
-import urllib.error
+import requests
 
 
 def narrate(
@@ -41,10 +40,14 @@ def narrate(
     max_tokens = llm_cfg.get("max_tokens", 256)
     api_key_env = llm_cfg.get("api_key_env", "OPENROUTER_API_KEY")
 
-    api_key = os.environ.get(api_key_env, "")
+    # Fallback to the literal string if it looks like an API key, so raw keys work directly.
+    api_key = os.environ.get(api_key_env, None)
+    if not api_key:
+        api_key = api_key_env if api_key_env.startswith(("sk-", "gsk_")) else ""
+
     if not api_key:
         return (
-            f"[LLMNarrator] ERROR: API key not found in env var '{api_key_env}'. "
+            f"[LLMNarrator] ERROR: API key not found in env var '{api_key_env}' and doesn't look like a raw key. "
             f"Set it with: export {api_key_env}=sk-..."
         )
 
@@ -60,26 +63,26 @@ def narrate(
     headers = {
         "Content-Type": "application/json",
         "Authorization": f"Bearer {api_key}",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
     }
 
     try:
-        req = urllib.request.Request(
+        resp = requests.post(
             base_url,
-            data=json.dumps(payload).encode("utf-8"),
+            json=payload,
             headers=headers,
-            method="POST",
+            timeout=30
         )
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            body = json.loads(resp.read().decode("utf-8"))
+        resp.raise_for_status()
 
-        # OpenRouter / OpenAI-compatible response format
+        body = resp.json()
+
         choices = body.get("choices", [])
         if choices:
             return choices[0].get("message", {}).get("content", "").strip()
         return "[LLMNarrator] WARNING: Empty response from API."
 
-    except urllib.error.HTTPError as e:
-        error_body = e.read().decode("utf-8", errors="replace")
-        return f"[LLMNarrator] HTTP {e.code}: {error_body[:200]}"
+    except requests.exceptions.HTTPError as e:
+        return f"[LLMNarrator] HTTP Error: {e.response.status_code} - {e.response.text[:200]}"
     except Exception as e:
         return f"[LLMNarrator] ERROR: {e}"

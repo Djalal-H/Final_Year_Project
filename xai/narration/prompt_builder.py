@@ -40,6 +40,31 @@ _SYSTEM_PROMPT = (
 # =============================================================================
 
 
+def _describe_nearby_agents(report: Dict[str, Any]) -> str:
+    """Convert the scene_description dictionary into readable sentences for the LLM."""
+    desc_list = report.get("scene_description", [])
+    if not desc_list:
+        return "No agents nearby."
+
+    lines = ["Nearby agents:"]
+    for d in desc_list:
+        agent_id = d.get("agent_id")
+        dist = d.get("distance", "?")
+        rels = d.get("relations", [])
+        ttc = d.get("ttc")
+
+        # Format relations into a readable list
+        rel_str = ", ".join(rels).replace("_", " ") if rels else "no specific relation"
+        
+        sentence = f"- Agent {agent_id} is {dist}m away ({rel_str})"
+        if ttc is not None:
+            sentence += f" with TTC {ttc}s"
+        sentence += "."
+        lines.append(sentence)
+
+    return " ".join(lines)
+
+
 def _build_detailed(report: Dict[str, Any]) -> str:
     """Full causal explanation for GROUNDED_CRITICAL."""
     ego = report["ego_state"]
@@ -48,9 +73,12 @@ def _build_detailed(report: Dict[str, Any]) -> str:
     grounding = report.get("attention_grounding", {})
     necessity = report.get("necessity_score", 0)
 
+    scene_str = _describe_nearby_agents(report)
+
     lines = [
         f"The Ego Vehicle is {ego.get('ego_action', 'moving')} "
         f"at {ego.get('ego_velocity', '?')} m/s.",
+        scene_str,
         f"The agent chose: {chosen.get('label', 'unknown action')}.",
         f"Decision necessity: {necessity:.0%} of alternatives would fail.",
     ]
@@ -105,9 +133,12 @@ def _build_brief(report: Dict[str, Any]) -> str:
     necessity = report.get("necessity_score", 0)
     decision_class = report.get("decision_class", "ROUTINE")
 
+    scene_str = _describe_nearby_agents(report)
+
     lines = [
         f"The Ego Vehicle is {ego.get('ego_action', 'moving')} "
         f"at {ego.get('ego_velocity', '?')} m/s.",
+        scene_str,
         f"Action: {chosen.get('label', 'unknown')}. "
         f"Decision class: {decision_class} "
         f"(necessity {necessity:.0%}).",

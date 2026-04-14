@@ -211,6 +211,33 @@ def run_xai_eval(args):
         sdc_paths_from_data=(not args.waymo_dataset),
     )
 
+    # ── 1b. Auto-detect encoder layout from model's observation_config ──
+    if args.sdc_actor == "ai":
+        try:
+            run_path = f"{args.src_dir}/{args.path_model}/"
+            model_cfg = utils.load_yaml_config(run_path + ".hydra/config.yaml")
+            obs_cfg = model_cfg.get("observation_config", {})
+            auto_layout = {
+                "n_sdc_timesteps": obs_cfg.get("sdc_obs_timesteps", 11),
+                "num_objects": obs_cfg.get("max_num_objects", args.max_num_objects),
+                "timestep_agent": obs_cfg.get("agent_obs_timesteps", 11),
+                "roadgraph_top_k": obs_cfg.get("roadgraph_top_k", 1000),
+                "num_traffic_lights": obs_cfg.get("num_traffic_lights", 16),
+                "tl_timesteps": obs_cfg.get("tl_obs_timesteps", 1),
+                "gps_path_len": obs_cfg.get("gps_path_len", 80),
+            }
+            total_tokens = (
+                auto_layout["n_sdc_timesteps"]
+                + auto_layout["num_objects"] * auto_layout["timestep_agent"]
+                + auto_layout["roadgraph_top_k"]
+                + auto_layout["num_traffic_lights"] * auto_layout["tl_timesteps"]
+                + auto_layout["gps_path_len"]
+            )
+            print(f"    [INFO] Auto-detected encoder layout: {auto_layout} → {total_tokens} tokens")
+            pipeline_cfg["encoder_layout"] = auto_layout
+        except Exception as e:
+            print(f"    [WARN] Could not auto-detect encoder layout: {e}. Using xai_config defaults.")
+
     # ── 2. Data Generator ──
     batch_dims = (1, 1)
     data_generator = make_data_generator(
@@ -298,11 +325,35 @@ def run_xai_eval(args):
 
             # Extract attention weights produced alongside the action.
             # For non-AI policies (expert, idm, etc.) this will be {}.
-            policy_extras = getattr(rl_transition, "extras", {}).get("policy_extras", {})
-            attention_weights: Dict[str, Any] = policy_extras.get("encoder_attn_weights", {})
-            if attention_weights:
-                # Device-get all arrays so numpy operations work downstream
-                attention_weights = jax.device_get(attention_weights)
+            attention_weights: Dict[str, Any] = {}
+            try:
+                extras = rl_transition.extras
+                if step_count == 0 and scenario_idx == 0:
+                    print(f"    [DEBUG] rl_transition type: {type(rl_transition)}")
+                    print(f"    [DEBUG] extras type: {type(extras)}")
+                    print(f"    [DEBUG] extras keys: {extras.keys() if hasattr(extras, 'keys') else 'N/A'}")
+                    if hasattr(extras, 'keys') and "policy_extras" in extras:
+                        pe = extras["policy_extras"]
+                        print(f"    [DEBUG] policy_extras type: {type(pe)}")
+                        print(f"    [DEBUG] policy_extras keys: {pe.keys() if hasattr(pe, 'keys') else 'N/A'}")
+                        if hasattr(pe, 'keys') and "encoder_attn_weights" in pe:
+                            aw = pe["encoder_attn_weights"]
+                            print(f"    [DEBUG] encoder_attn_weights type: {type(aw)}")
+                            if hasattr(aw, 'keys'):
+                                print(f"    [DEBUG] attn keys: {list(aw.keys())}")
+                                for k, v in aw.items():
+                                    print(f"    [DEBUG]   {k}: shape={v.shape}")
+                            elif hasattr(aw, 'shape'):
+                                print(f"    [DEBUG] attn shape: {aw.shape}")
+
+                policy_extras = extras.get("policy_extras", {}) if hasattr(extras, 'get') else {}
+                raw_attn = policy_extras.get("encoder_attn_weights", {}) if hasattr(policy_extras, 'get') else {}
+
+                if raw_attn is not None and raw_attn:
+                    attention_weights = jax.device_get(raw_attn)
+            except Exception as e:
+                if step_count == 0:
+                    print(f"    [DEBUG] Failed to extract attention weights: {e}")
 
             # ================================================================
             # A. SEMANTIC GRAPH (Module 2)
@@ -331,7 +382,6 @@ def run_xai_eval(args):
                         env_transition=current_transition,
                         env=env,
                         step_fn=jitted_step_fn,
-                        chosen_action_idx=0,
                     )
                 except Exception as e:
                     print(f"    ⚠️ Counterfactual generation failed: {e}")
@@ -370,11 +420,30 @@ def run_xai_eval(args):
             # ================================================================
             # F. BUILD & SAVE REPORT (Module 8)
             # ================================================================
-            chosen_action = (
-                counterfactual_result["chosen_action"]
-                if counterfactual_result
-                else {"label": "N/A", "accel": 0.0, "steer": 0.0, "outcome": "N/A"}
-            )
+            # Extract the REAL mathematical continuous action from the RL policy
+            true_action_arr = jax.device_get(rl_transition.action)
+            if true_action_arr.ndim > 1:
+                true_action_arr = true_action_arr[0]
+                
+            accel, steer = float(true_action_arr[0]), float(true_action_arr[1])
+            
+            # Simple heuristic labeling for the prompt
+            label_parts = []
+            if accel > 0.5: label_parts.append("Accelerate")
+            elif accel < -0.5: label_parts.append("Brake")
+            else: label_parts.append("Maintain Speed")
+            
+            if steer > 0.05: label_parts.append("Steer Left")
+            elif steer < -0.05: label_parts.append("Steer Right")
+            
+            action_label = " + ".join(label_parts)
+            
+            chosen_action = {
+                "label": action_label,
+                "accel": round(accel, 2),
+                "steer": round(steer, 2),
+                "outcome": None
+            }
 
             report = None
             if step_count % f_report == 0:
@@ -384,6 +453,7 @@ def run_xai_eval(args):
                     ego_state=graph["scenario_info"],
                     chosen_action=chosen_action,
                     context_categories=context_categories,
+                    scene_edges=graph["semantic_edges"],
                     alternatives=(
                         counterfactual_result.get("alternatives", [])
                         if counterfactual_result

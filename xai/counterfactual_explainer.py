@@ -357,7 +357,6 @@ class CounterfactualExplainer:
         env_transition,
         env,
         step_fn,
-        chosen_action_idx: int = 0
     ) -> Dict[str, Any]:
         """
         Generate counterfactual explanations using vectorized (vmap) rollouts.
@@ -435,13 +434,9 @@ class CounterfactualExplainer:
                 "threat_agent_id": threat_agent_id,
             }
             
-            if idx == chosen_action_idx:
-                chosen_action = entry
-            else:
-                alternatives.append(entry)
+            alternatives.append(entry)
                 
         return {
-            "chosen_action": chosen_action,
             "alternatives": alternatives
         }
 

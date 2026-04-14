@@ -13,3 +13,7 @@ videos
 
 #runs
 runs
+
+#env files
+.env
+.env.local
