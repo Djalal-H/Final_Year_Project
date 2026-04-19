@@ -91,6 +91,7 @@ def save(
     output_dir: str,
     scenario_id: str,
     step: int,
+    model_name: Optional[str] = None,
 ) -> str:
     """
     Persist a report to disk as JSON.
@@ -100,11 +101,18 @@ def save(
         output_dir: Directory to write into.
         scenario_id: Scenario identifier string.
         step: Step index (used in filename).
+        model_name: Optional LLM model name for sub-directory.
 
     Returns:
         Absolute path to the written file.
     """
-    reports_dir = os.path.join(output_dir, "reports")
+    if model_name:
+        # Sanitize model name (replace slashes for directory safety)
+        safe_model = model_name.replace("/", "_")
+        reports_dir = os.path.join(output_dir, "reports", safe_model)
+    else:
+        reports_dir = os.path.join(output_dir, "reports")
+
     os.makedirs(reports_dir, exist_ok=True)
 
     filename = f"report_{scenario_id}_step_{step:04d}.json"

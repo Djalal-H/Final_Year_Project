@@ -17,7 +17,7 @@ def narrate(
     system_prompt: str,
     user_prompt: str,
     config: Dict[str, Any],
-) -> str:
+) -> tuple[str, float]:
     """
     Call the LLM API and return the narration string.
 
@@ -32,7 +32,7 @@ def narrate(
             - ``api_key_env``: environment variable name holding the API key
 
     Returns:
-        Narration string from the LLM, or an error placeholder.
+        Tuple of (Narration string, Response time in seconds).
     """
     llm_cfg = config.get("llm", {})
     base_url = llm_cfg.get("base_url", "https://openrouter.ai/api/v1/chat/completions")
@@ -75,14 +75,21 @@ def narrate(
         )
         resp.raise_for_status()
 
-        body = resp.json()
+        # 1. Parse local HTTP time (fallback)
+        api_time = resp.elapsed.total_seconds()
+
+        # 2. Prefer Groq's exact server-side inference time if available
+        if "x_groq" in body and "usage" in body["x_groq"]:
+            if "total_time" in body["x_groq"]["usage"]:
+                api_time = body["x_groq"]["usage"]["total_time"]
 
         choices = body.get("choices", [])
         if choices:
-            return choices[0].get("message", {}).get("content", "").strip()
-        return "[LLMNarrator] WARNING: Empty response from API."
+            text = choices[0].get("message", {}).get("content", "").strip()
+            return text, round(api_time, 4)
+        return "[LLMNarrator] WARNING: Empty response from API.", round(api_time, 4)
 
     except requests.exceptions.HTTPError as e:
-        return f"[LLMNarrator] HTTP Error: {e.response.status_code} - {e.response.text[:200]}"
+        return f"[LLMNarrator] HTTP Error: {e.response.status_code} - {e.response.text[:200]}", 0.0
     except Exception as e:
-        return f"[LLMNarrator] ERROR: {e}"
+        return f"[LLMNarrator] ERROR: {e}", 0.0

@@ -12,12 +12,14 @@ gymnasium
 hydra-core
 matplotlib<3.10
 tensorboard
+tensorboardX
 tensorboard-plugin-profile
 psutil
 pandas
 seaborn
 ipython
 ipykernel
+deepeval
 
 #Dev
 pre-commit

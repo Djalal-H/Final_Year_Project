@@ -464,22 +464,28 @@ def run_xai_eval(args):
                     decision_class=dec_class,
                 )
 
+                # G. LLM NARRATION (Modules 9 → 10 → 11)  [online mode]
+                narration = None
+                llm_model_name = None
+                if narration_mode == "online":
+                    llm_model_name = pipeline_cfg.get("llm", {}).get("model", "unknown_model")
+                    template_key, _ = narration_router.route(report)
+                    system_prompt, user_prompt = build_prompt(template_key, report)
+                    narration, response_time = llm_narrator.narrate(
+                        system_prompt, user_prompt, pipeline_cfg
+                    )
+                    report["narration"] = narration
+                    report["narration_response_time_s"] = response_time
+                    print(f"    [LLM] {narration[:120]}... ({response_time}s)")
+
                 report_path = report_builder.save(
-                    report, eval_path, f"scenario_{scenario_idx}", step_count
+                    report, 
+                    eval_path, 
+                    f"scenario_{scenario_idx}", 
+                    step_count,
+                    model_name=llm_model_name
                 )
                 print(f"    [XAI] Report saved: {report_path} [{dec_class}]")
-
-            # ================================================================
-            # G. LLM NARRATION (Modules 9 → 10 → 11)  [optional]
-            # ================================================================
-            narration = None
-            if report is not None and narration_mode == "online":
-                template_key, _ = narration_router.route(report)
-                system_prompt, user_prompt = build_prompt(template_key, report)
-                narration = llm_narrator.narrate(
-                    system_prompt, user_prompt, pipeline_cfg
-                )
-                print(f"    [LLM] {narration[:120]}...")
 
             # ================================================================
             # H. GRAPH VISUALIZATION

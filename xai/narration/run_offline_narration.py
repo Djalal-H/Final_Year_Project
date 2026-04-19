@@ -47,17 +47,21 @@ def run_offline_narration(reports_dir: str, config_path: str):
         system_prompt, user_prompt = prompt_builder.build_prompt(template_key, report)
 
         # 3. Call LLM
-        start_time = time.time()
-        narration = llm_narrator.narrate(system_prompt, user_prompt, config)
-        response_time = time.time() - start_time
+        narration, response_time = llm_narrator.narrate(system_prompt, user_prompt, config)
 
         # 4. Update Report
         report["narration"] = narration
-        report["narration_response_time_s"] = round(response_time, 2)
+        report["narration_response_time_s"] = round(response_time, 4)
         print(f"    -> Done in {response_time:.4f}s")
 
-        # 5. Save back
-        with open(file_path, "w") as f:
+        # 5. Save to model-specific subdirectory
+        model_name = config.get("llm", {}).get("model", "unknown_model")
+        safe_model = model_name.replace("/", "_")
+        target_dir = os.path.join(reports_dir, safe_model)
+        os.makedirs(target_dir, exist_ok=True)
+        
+        target_path = os.path.join(target_dir, os.path.basename(file_path))
+        with open(target_path, "w") as f:
             json.dump(report, f, indent=4)
         
         processed += 1
