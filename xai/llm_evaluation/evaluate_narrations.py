@@ -94,7 +94,7 @@ def _evaluate_single_model(
     print(f"\n🔍 Evaluating {len(dataset.test_cases)} narrations "
           f"from '{model_name}' with judge='{config.judge_model}'...\n")
 
-    from deepeval.configs import AsyncConfig
+    from deepeval.evaluate import AsyncConfig
 
     eval_results = evaluate(
         test_cases=dataset.test_cases,
