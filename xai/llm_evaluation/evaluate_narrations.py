@@ -94,9 +94,16 @@ def _evaluate_single_model(
     print(f"\n🔍 Evaluating {len(dataset.test_cases)} narrations "
           f"from '{model_name}' with judge='{config.judge_model}'...\n")
 
+    from deepeval.configs import AsyncConfig
+
     eval_results = evaluate(
         test_cases=dataset.test_cases,
         metrics=metrics,
+        async_config=AsyncConfig(
+            run_async=True,
+            max_concurrent=1,
+            throttle_value=15, # Delay between test cases to respect 5 req/min.
+        )
     )
 
     # Collect per-report scores from the evaluation results
