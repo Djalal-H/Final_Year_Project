@@ -97,7 +97,6 @@ def _evaluate_single_model(
     eval_results = evaluate(
         test_cases=dataset.test_cases,
         metrics=metrics,
-        print_results=True,
     )
 
     # Collect per-report scores from the evaluation results

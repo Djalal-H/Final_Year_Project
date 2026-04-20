@@ -106,7 +106,9 @@ def load_reports(
     print(f"📊 Loaded {len(test_cases)} test cases from {reports_dir} "
           f"(skipped {skipped})")
 
-    return EvaluationDataset(test_cases=test_cases)
+    dataset = EvaluationDataset()
+    dataset.test_cases = test_cases
+    return dataset
 
 
 def get_decision_classes(dataset: EvaluationDataset) -> List[str]:
