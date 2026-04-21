@@ -74,13 +74,14 @@ def _evaluate_single_model(
     reports_dir: str,
     model_name: str,
     config: EvalConfig,
+    max_reports: Optional[int] = None,
 ) -> dict:
     """Run evaluation for a single model and return results dict."""
 
     dataset = load_reports(
         reports_dir=reports_dir,
         decision_class_filter=config.decision_class_filter,
-        max_reports=None,
+        max_reports=max_reports,
     )
 
     if not dataset.test_cases:
@@ -229,7 +230,7 @@ def main():
 
         all_results = []
         for rdir, mname in zip(args.reports_dirs, args.model_names):
-            result = _evaluate_single_model(rdir, mname, config)
+            result = _evaluate_single_model(rdir, mname, config, max_reports=args.max_reports)
             if result:
                 all_results.append(result)
 
@@ -258,7 +259,7 @@ def main():
         if not args.reports_dir:
             parser.error("--reports_dir is required in single-model mode")
 
-        result = _evaluate_single_model(args.reports_dir, args.model_name, config)
+        result = _evaluate_single_model(args.reports_dir, args.model_name, config, max_reports=args.max_reports)
         output = result
 
     # Save results
