@@ -27,6 +27,7 @@ from xai.computation.semantic_graph import SemanticGraphBuilder
 from xai.computation.adaptive_action_grid import build_action_grid
 from xai.computation import necessity_scorer
 from xai.computation import attention_grounder
+from xai.computation.attention_grounder import reconstruct_token_agent_ids
 from xai.computation import decision_classifier
 from xai.computation import report_builder
 from xai.narration import narration_router
@@ -217,14 +218,24 @@ def run_xai_eval(args):
             run_path = f"{args.src_dir}/{args.path_model}/"
             model_cfg = utils.load_yaml_config(run_path + ".hydra/config.yaml")
             obs_cfg = model_cfg.get("observation_config", {})
+            objects_cfg = obs_cfg.get("objects", {})
+            rg_cfg = obs_cfg.get("roadgraphs", {})
+            tl_cfg = obs_cfg.get("traffic_lights", {})
+            pt_cfg = obs_cfg.get("path_target", {})
+
+            # num_closest_objects is the actual count of non-SDC agents
+            # in the encoder's token sequence (NOT max_num_objects).
+            num_closest_objs = objects_cfg.get("num_closest_objects", 8)
+            obs_steps = obs_cfg.get("obs_past_num_steps", 5)
+
             auto_layout = {
-                "n_sdc_timesteps": obs_cfg.get("sdc_obs_timesteps", 11),
-                "num_objects": obs_cfg.get("max_num_objects", args.max_num_objects),
-                "timestep_agent": obs_cfg.get("agent_obs_timesteps", 11),
-                "roadgraph_top_k": obs_cfg.get("roadgraph_top_k", 1000),
-                "num_traffic_lights": obs_cfg.get("num_traffic_lights", 16),
-                "tl_timesteps": obs_cfg.get("tl_obs_timesteps", 1),
-                "gps_path_len": obs_cfg.get("gps_path_len", 80),
+                "n_sdc_timesteps": obs_steps,
+                "num_objects": num_closest_objs,
+                "timestep_agent": obs_steps,
+                "roadgraph_top_k": rg_cfg.get("roadgraph_top_k", 1000),
+                "num_traffic_lights": tl_cfg.get("num_closest_traffic_lights", 16),
+                "tl_timesteps": obs_steps,
+                "gps_path_len": pt_cfg.get("num_points", 80),
             }
             total_tokens = (
                 auto_layout["n_sdc_timesteps"]
@@ -235,6 +246,7 @@ def run_xai_eval(args):
             )
             print(f"    [INFO] Auto-detected encoder layout: {auto_layout} → {total_tokens} tokens")
             pipeline_cfg["encoder_layout"] = auto_layout
+            pipeline_cfg["num_closest_objects"] = num_closest_objs
         except Exception as e:
             print(f"    [WARN] Could not auto-detect encoder layout: {e}. Using xai_config defaults.")
 
@@ -400,12 +412,20 @@ def run_xai_eval(args):
             # D. ATTENTION GROUNDING (Module 6)
             #    attention_weights come from the policy step above —
             #    these are the exact weights used to make the decision.
+            #    token_agent_ids maps token-slot → original agent ID,
+            #    replicating the feature extractor's distance-sort.
             # ================================================================
+            n_closest = pipeline_cfg.get("num_closest_objects",
+                                        pipeline_cfg.get("encoder_layout", {}).get("num_objects", 64))
+            token_agent_ids = reconstruct_token_agent_ids(
+                current_transition.state, ego_idx, n_closest
+            )
             grounding_result = attention_grounder.compute(
                 attention_weights=attention_weights,
                 encoder_layout=pipeline_cfg.get("encoder_layout", {}),
                 threat_agents=necessity_result["threat_agents"],
                 config=pipeline_cfg,
+                token_agent_ids=token_agent_ids,
             )
 
             # ================================================================

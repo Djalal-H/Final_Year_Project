@@ -6,6 +6,12 @@ Given raw cross-attention weights from the LQ/Perceiver encoder and the
 threat agents identified by the NecessityScorer, compute the Attention
 Grounding Score — a measure of whether the model was actually attending
 to the agents that would have caused failures.
+
+IMPORTANT: The encoder's token sequence for "other objects" is ordered by
+distance to the SDC (closest first), NOT by original simulator agent ID.
+Therefore a ``token_agent_ids`` mapping must be supplied to translate
+between token positions and the original agent IDs used by the
+NecessityScorer / CounterfactualExplainer.
 """
 
 from typing import Any, Dict, List, Optional
@@ -18,6 +24,7 @@ def compute(
     encoder_layout: Dict[str, Any],
     threat_agents: List[Dict[str, Any]],
     config: Dict[str, Any],
+    token_agent_ids: Optional[np.ndarray] = None,
 ) -> Dict[str, Any]:
     """
     Compute the attention grounding score.
@@ -30,7 +37,16 @@ def compute(
             ``timestep_agent``, ``roadgraph_top_k``, ``num_traffic_lights``,
             ``tl_timesteps``, ``gps_path_len``.
         threat_agents: List of ``{agent_id, min_ttc}`` dicts from NecessityScorer.
+            ``agent_id`` is the *original simulator index*.
         config: Pipeline config dict (needs ``attention_layer_key``).
+        token_agent_ids: 1-D integer array of length ``num_objects`` where
+            ``token_agent_ids[j]`` is the original simulator agent ID that
+            occupies token-position *j* in the encoder's "other objects"
+            region.  Obtained by sorting agents by distance to SDC
+            (closest first) — the same order the feature extractor uses.
+            If ``None``, falls back to the identity mapping (position == ID),
+            which is only correct if the feature extractor does not re-order
+            agents.
 
     Returns:
         Dictionary with:
@@ -70,23 +86,38 @@ def compute(
     timestep_agent = encoder_layout.get("timestep_agent", 11)
 
     vehicles_start = n_sdc
-    vehicles_end = vehicles_start + num_objects * timestep_agent
 
-    # 4. Compute per-agent attention mass
-    #    Agent j occupies tokens [vehicles_start + j*T .. vehicles_start + (j+1)*T)
-    per_agent_mass = np.zeros(num_objects, dtype=np.float64)
+    # 4. Compute per-slot attention mass
+    #    Slot j (token position j in the other-objects region) occupies
+    #    tokens [vehicles_start + j*T .. vehicles_start + (j+1)*T)
+    per_slot_mass = np.zeros(num_objects, dtype=np.float64)
     for j in range(num_objects):
         start = vehicles_start + j * timestep_agent
         end = start + timestep_agent
         if end <= len(per_token_mass):
-            per_agent_mass[j] = per_token_mass[start:end].sum()
+            per_slot_mass[j] = per_token_mass[start:end].sum()
 
-    # 5. Normalize to sum to 1 across all agents
-    total = per_agent_mass.sum()
+    # 5. Normalize to sum to 1 across all slots
+    total = per_slot_mass.sum()
     if total > 0:
-        per_agent_mass = per_agent_mass / total
+        per_slot_mass = per_slot_mass / total
 
-    # 6. Compute severity and grounding score
+    # 6. Build reverse mapping: original_agent_id → token slot index
+    #    token_agent_ids[slot] = original_agent_id
+    #    We need: original_agent_id → slot
+    if token_agent_ids is not None:
+        token_agent_ids = np.asarray(token_agent_ids).ravel()
+        # Build dict: agent_id → slot_index
+        aid_to_slot = {}
+        for slot_idx, orig_id in enumerate(token_agent_ids[:num_objects]):
+            orig_id_int = int(orig_id)
+            if orig_id_int not in aid_to_slot:
+                aid_to_slot[orig_id_int] = slot_idx
+    else:
+        # Fallback: identity mapping (slot index == agent ID)
+        aid_to_slot = {j: j for j in range(num_objects)}
+
+    # 7. Compute severity and grounding score
     breakdown = []
     grounding_score = 0.0
 
@@ -95,9 +126,11 @@ def compute(
         min_ttc = ta["min_ttc"]
         severity = 1.0 / (1.0 + min_ttc)
 
-        if 0 <= aid < num_objects:
-            a_mass = float(per_agent_mass[aid])
+        slot = aid_to_slot.get(aid)
+        if slot is not None and 0 <= slot < num_objects:
+            a_mass = float(per_slot_mass[slot])
         else:
+            # Agent was not among the closest objects fed to the encoder
             a_mass = 0.0
 
         grounding_score += a_mass * severity
@@ -113,3 +146,83 @@ def compute(
         "grounding_score": round(float(grounding_score), 4),
         "per_agent_breakdown": breakdown,
     }
+
+
+def reconstruct_token_agent_ids(
+    state,
+    ego_idx: int,
+    num_closest_objects: int,
+) -> np.ndarray:
+    """Reconstruct the distance-sorted agent IDs that the feature extractor
+    used when assembling the encoder's token sequence.
+
+    This replicates the logic from
+    ``VecFeaturesExtractor._build_objects_features``:
+
+    1. Compute Euclidean distance from the SDC to every agent at the
+       *current* timestep.
+    2. Sort by distance ascending, select the ``num_closest_objects + 1``
+       closest (including the SDC itself).
+    3. Drop the SDC (index 0 after sort) — the remaining IDs, in order,
+       are the original simulator agent IDs assigned to each token slot.
+
+    Args:
+        state: JAX SimulatorState (possibly batched with leading dim 1).
+        ego_idx: Index of the SDC agent in the object dimension.
+        num_closest_objects: Number of other (non-SDC) objects the feature
+            extractor keeps — corresponds to
+            ``objects_config["num_closest_objects"]``.
+
+    Returns:
+        1-D int array of length ``num_closest_objects``, where entry *j* is
+        the original simulator agent ID occupying token-slot *j*.
+    """
+    import jax as _jax
+
+    # ── Extract current-timestep positions ──
+    traj = state.sim_trajectory
+    timestep_raw = _jax.device_get(state.timestep)
+    timestep_arr = np.array(timestep_raw)
+    idx = int(timestep_arr[0]) if timestep_arr.ndim >= 1 else int(timestep_arr)
+
+    def _get_field(field):
+        val = np.array(_jax.device_get(field))
+        if val.ndim == 3:          # [B, N_agents, T]
+            return val[0, :, idx]
+        elif val.ndim == 2:        # [N_agents, T]
+            return val[:, idx]
+        return val
+
+    cur_x = _get_field(traj.x)
+    cur_y = _get_field(traj.y)
+    cur_valid = _get_field(traj.valid).astype(bool)
+
+    n_agents = len(cur_x)
+
+    # ── Compute distance to SDC (ego) ──
+    ego_x, ego_y = float(cur_x[ego_idx]), float(cur_y[ego_idx])
+    dx = cur_x - ego_x
+    dy = cur_y - ego_y
+    distances = np.sqrt(dx ** 2 + dy ** 2)
+
+    # Invalid agents get infinite distance so they sort to the end
+    distances = np.where(cur_valid, distances, np.inf)
+
+    # ── Sort ascending by distance, pick top-(num_closest_objects + 1) ──
+    # top_k maximizes, so negate for ascending order
+    k = min(num_closest_objects + 1, n_agents)
+    closest_idxs = np.argsort(distances)[:k]
+
+    # ── Drop the SDC ──
+    # The SDC should be index 0 (distance 0), but let's be defensive
+    # and remove it wherever it appears in the sorted list.
+    closest_idxs = closest_idxs[closest_idxs != ego_idx]
+
+    # Ensure exactly num_closest_objects entries (pad with -1 if needed)
+    if len(closest_idxs) < num_closest_objects:
+        pad = np.full(num_closest_objects - len(closest_idxs), -1, dtype=closest_idxs.dtype)
+        closest_idxs = np.concatenate([closest_idxs, pad])
+    else:
+        closest_idxs = closest_idxs[:num_closest_objects]
+
+    return closest_idxs
