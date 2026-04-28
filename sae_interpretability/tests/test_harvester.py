@@ -7,7 +7,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from xai.sae_interpretability.config import SAEConfig
+from sae_interpretability.config import SAEConfig
 
 
 # ------------------------------------------------------------------

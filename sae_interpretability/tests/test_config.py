@@ -8,7 +8,7 @@ import tempfile
 import pytest
 import yaml
 
-from xai.sae_interpretability.config import SAEConfig
+from sae_interpretability.config import SAEConfig
 
 
 def test_default_values():

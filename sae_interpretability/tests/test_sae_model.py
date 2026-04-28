@@ -9,7 +9,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from xai.sae_interpretability.sae_model import SparseAutoencoder
+from sae_interpretability.sae_model import SparseAutoencoder
 
 
 @pytest.fixture
