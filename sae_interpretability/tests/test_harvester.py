@@ -59,7 +59,7 @@ def cfg():
 @pytest.fixture
 def harvester(cfg):
     """ActivationHarvester with setup() skipped (no model / env needed)."""
-    from xai.sae_interpretability.harvester import ActivationHarvester
+    from sae_interpretability.harvester import ActivationHarvester
     h = object.__new__(ActivationHarvester)
     h.sae_cfg = cfg
     # Minimal attributes referenced by _build_telemetry_row / helpers

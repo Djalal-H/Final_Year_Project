@@ -6,7 +6,7 @@ Loads harvested activations from HDF5, mean-centers them, trains the
 SparseAutoencoder, and saves the best checkpoint.
 
 Usage:
-    python -m xai.sae_interpretability.sae_trainer \\
+    python -m sae_interpretability.sae_trainer \\
         --data harvest.h5 \\
         --expansion_factor 16 \\
         --l1_coeff 1e-3 \\
@@ -46,7 +46,8 @@ def train(data_path: str, output_path: str, cfg: SAEConfig) -> SparseAutoencoder
     print(f"[Trainer] Loading activations from {data_path}")
     with h5py.File(data_path, 'r') as hf:
         activations = hf['activations'][:]  # [N, D]
-        hidden_dim = int(hf['metadata'].attrs.get('hidden_dim', cfg.wayformer_hidden_dim))
+        hidden_dim = int(hf['metadata'].attrs.get(
+            'hidden_dim', cfg.wayformer_hidden_dim))
 
     N, D = activations.shape
     print(f"[Trainer] Dataset: {N:,} rows × {D} dims")
@@ -54,7 +55,8 @@ def train(data_path: str, output_path: str, cfg: SAEConfig) -> SparseAutoencoder
     # Mean-center: stored in checkpoint so annotation/steering can reproduce it
     act_mean = activations.mean(axis=0, keepdims=True).astype(np.float32)
     activations_centered = (activations - act_mean).astype(np.float32)
-    print(f"[Trainer] Activation mean norm: {np.linalg.norm(act_mean):.4f} (subtracted)")
+    print(
+        f"[Trainer] Activation mean norm: {np.linalg.norm(act_mean):.4f} (subtracted)")
 
     x = torch.from_numpy(activations_centered)
     loader = DataLoader(
@@ -66,11 +68,14 @@ def train(data_path: str, output_path: str, cfg: SAEConfig) -> SparseAutoencoder
     )
 
     latent_dim = hidden_dim * cfg.sae_expansion_factor
-    model = SparseAutoencoder(hidden_dim, latent_dim, cfg.sae_l1_coeff).to(device)
-    print(f"[Trainer] SAE: {hidden_dim}D → {latent_dim}D (×{cfg.sae_expansion_factor})")
+    model = SparseAutoencoder(hidden_dim, latent_dim,
+                              cfg.sae_l1_coeff).to(device)
+    print(
+        f"[Trainer] SAE: {hidden_dim}D → {latent_dim}D (×{cfg.sae_expansion_factor})")
 
     optimizer = optim.Adam(model.parameters(), lr=cfg.sae_learning_rate)
-    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=cfg.sae_epochs)
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=cfg.sae_epochs)
 
     # Sample for dead-feature tracking (up to 8192 rows, kept on CPU)
     sample_x = x[:min(8192, N)]
@@ -108,12 +113,14 @@ def train(data_path: str, output_path: str, cfg: SAEConfig) -> SparseAutoencoder
         model.eval()
         with torch.no_grad():
             _, samp_feats, _ = model(sample_x.to(device))
-            dead_pct = 100.0 * (1 - (samp_feats > 0).any(dim=0).float().mean().item())
+            dead_pct = 100.0 * \
+                (1 - (samp_feats > 0).any(dim=0).float().mean().item())
 
         avg_loss = total_combined / n_batches
         if avg_loss < best_loss:
             best_loss = avg_loss
-            _save_checkpoint(model, cfg, output_path, act_mean, epoch, best_loss)
+            _save_checkpoint(model, cfg, output_path,
+                             act_mean, epoch, best_loss)
 
         print(
             f"Epoch {epoch:3d}/{cfg.sae_epochs}  "
@@ -124,7 +131,8 @@ def train(data_path: str, output_path: str, cfg: SAEConfig) -> SparseAutoencoder
             f"dead={dead_pct:.1f}%"
         )
 
-    print(f"\n[Trainer] Best checkpoint → {output_path}  (loss={best_loss:.5f})")
+    print(
+        f"\n[Trainer] Best checkpoint → {output_path}  (loss={best_loss:.5f})")
     return SparseAutoencoder.from_checkpoint(output_path)
 
 
@@ -153,7 +161,8 @@ def _save_checkpoint(
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Train SAE on harvested Wayformer activations.")
+    parser = argparse.ArgumentParser(
+        description="Train SAE on harvested Wayformer activations.")
     parser.add_argument("--data", required=True, help="Path to harvest.h5")
     parser.add_argument("--output", default="sae_model.pt")
     parser.add_argument("--expansion_factor", type=int, default=16)

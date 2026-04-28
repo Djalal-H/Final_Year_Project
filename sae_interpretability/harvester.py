@@ -6,13 +6,18 @@ Extends OfflineExtractor to capture residual stream vectors and rich telemetry
 in HDF5 format. The harvested data is the input to sae_trainer.py.
 
 Usage:
-    python -m xai.sae_interpretability.harvester \\
+    python -m sae_interpretability.harvester \\
         --run_dir ../../runs/PPO_VEC_WAYFORMER \\
         --dataset ../../training.tfrecord \\
         --n_scenarios 500 --output harvest.h5
 """
 
 from __future__ import annotations
+from sae_interpretability.config import SAEConfig
+from xai.attention_analysis.offline_extraction import OfflineExtractor
+import jax.numpy as jnp
+import jax
+import h5py
 
 import argparse
 import os
@@ -22,16 +27,11 @@ from typing import Any, Dict, List, Optional
 
 import numpy as np
 
-project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../.."))
+project_root = os.path.abspath(os.path.join(
+    os.path.dirname(__file__), "../../.."))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
-import h5py
-import jax
-import jax.numpy as jnp
-
-from xai.attention_analysis.offline_extraction import OfflineExtractor
-from sae_interpretability.config import SAEConfig
 
 # Scalar telemetry fields written as float32 [N]
 _SCALAR_KEYS = ['ego_speed', 'ego_x', 'ego_y', 'min_ttc', 'min_agent_dist']
@@ -85,9 +85,11 @@ class ActivationHarvester(OfflineExtractor):
         valid = np.asarray(curr_sem.get('valid', []), dtype=bool)
         distances = np.asarray(curr_sem.get('distance_to_ego', []))
         curr_speeds = np.asarray(curr_sem.get('agent_speeds', []))
-        prev_speeds = np.asarray(prev_sem.get('agent_speeds', np.zeros_like(curr_speeds)))
+        prev_speeds = np.asarray(prev_sem.get(
+            'agent_speeds', np.zeros_like(curr_speeds)))
 
-        n = min(len(is_ahead), len(valid), len(distances), len(curr_speeds), len(prev_speeds))
+        n = min(len(is_ahead), len(valid), len(distances),
+                len(curr_speeds), len(prev_speeds))
         if n == 0:
             return False
 
@@ -104,8 +106,10 @@ class ActivationHarvester(OfflineExtractor):
         ahead_dists = np.where(ahead_and_valid, distances, np.inf)
         lead_idx = int(np.argmin(ahead_dists))
 
-        threshold = self.sae_cfg.hard_braking_g_threshold * self.G * self.sae_cfg.harvest_dt
-        speed_drop = float(prev_speeds[lead_idx]) - float(curr_speeds[lead_idx])
+        threshold = self.sae_cfg.hard_braking_g_threshold * \
+            self.G * self.sae_cfg.harvest_dt
+        speed_drop = float(prev_speeds[lead_idx]) - \
+            float(curr_speeds[lead_idx])
         return bool(speed_drop > threshold)
 
     def _build_telemetry_row(
@@ -143,15 +147,18 @@ class ActivationHarvester(OfflineExtractor):
         row['agent_is_left'] = is_left
 
         # Scalar summaries
-        valid_ttc = ttc[valid] if (len(ttc) > 0 and len(valid) > 0) else np.array([])
+        valid_ttc = ttc[valid] if (
+            len(ttc) > 0 and len(valid) > 0) else np.array([])
         min_ttc = float(np.min(valid_ttc)) if len(valid_ttc) > 0 else 5.0
-        min_dist = float(np.min(distances[valid])) if valid.any() and len(distances) > 0 else 999.0
+        min_dist = float(np.min(distances[valid])) if valid.any() and len(
+            distances) > 0 else 999.0
 
         row['min_ttc'] = min_ttc
         row['min_agent_dist'] = min_dist
 
         # Boolean event flags
-        row['is_ttc_critical'] = bool(min_ttc < self.sae_cfg.ttc_critical_threshold)
+        row['is_ttc_critical'] = bool(
+            min_ttc < self.sae_cfg.ttc_critical_threshold)
         row['is_lead_vehicle_hard_braking'] = self._compute_lead_vehicle_hard_braking(
             semantic, prev_semantic
         )
@@ -198,7 +205,8 @@ class ActivationHarvester(OfflineExtractor):
             latent, _ = self.encoder.apply({'params': e_params}, obs)
             return latent
 
-        os.makedirs(os.path.dirname(os.path.abspath(output_path)) or '.', exist_ok=True)
+        os.makedirs(os.path.dirname(os.path.abspath(output_path))
+                    or '.', exist_ok=True)
         D = self.sae_cfg.wayformer_hidden_dim
         total_rows = 0
 
@@ -226,13 +234,15 @@ class ActivationHarvester(OfflineExtractor):
             agent_float_ds: Dict[str, h5py.Dataset] = {}
             agent_valid_ds: Optional[h5py.Dataset] = None
 
-            print(f"[Harvester] Processing {n_scenarios} scenarios → {output_path}")
+            print(
+                f"[Harvester] Processing {n_scenarios} scenarios → {output_path}")
 
             for scenario_idx, scenario_batch in enumerate(data_gen):
                 if scenario_idx >= n_scenarios:
                     break
 
-                print(f"  Scenario {scenario_idx + 1}/{n_scenarios}", end="", flush=True)
+                print(
+                    f"  Scenario {scenario_idx + 1}/{n_scenarios}", end="", flush=True)
 
                 try:
                     env_transition = self.env.reset(scenario_batch)
@@ -249,11 +259,14 @@ class ActivationHarvester(OfflineExtractor):
                             latent_np = latent_np[0]  # squeeze batch dim → [D]
 
                         squeezed_state = jax.tree_util.tree_map(
-                            lambda x: x.squeeze(0) if hasattr(x, 'squeeze') and x.ndim > 0 else x,
+                            lambda x: x.squeeze(0) if hasattr(
+                                x, 'squeeze') and x.ndim > 0 else x,
                             env_transition.state,
                         )
-                        semantic = self.extract_semantic_features(squeezed_state)
-                        tel_row = self._build_telemetry_row(semantic, prev_semantic)
+                        semantic = self.extract_semantic_features(
+                            squeezed_state)
+                        tel_row = self._build_telemetry_row(
+                            semantic, prev_semantic)
 
                         batch_latents.append(latent_np)
                         batch_tel.append(tel_row)
@@ -264,7 +277,8 @@ class ActivationHarvester(OfflineExtractor):
                             break
 
                         try:
-                            env_transition = self._expert_step_single(env_transition)
+                            env_transition = self._expert_step_single(
+                                env_transition)
                         except Exception:
                             break
 
@@ -288,7 +302,8 @@ class ActivationHarvester(OfflineExtractor):
                     for k in _SCALAR_KEYS:
                         self._resize_and_write(
                             scalar_ds[k], total_rows,
-                            np.array([r[k] for r in batch_tel], dtype='float32')
+                            np.array([r[k]
+                                     for r in batch_tel], dtype='float32')
                         )
                     for k in _BOOL_KEYS:
                         self._resize_and_write(
@@ -311,7 +326,8 @@ class ActivationHarvester(OfflineExtractor):
                             np.asarray(r[k], dtype='float32')[:n_agents]
                             for r in batch_tel
                         ])
-                        self._resize_and_write(agent_float_ds[k], total_rows, mat)
+                        self._resize_and_write(
+                            agent_float_ds[k], total_rows, mat)
 
                     if agent_valid_ds is None:
                         agent_valid_ds = hf.create_dataset(
@@ -323,7 +339,8 @@ class ActivationHarvester(OfflineExtractor):
                         np.asarray(r['agent_valid'], dtype=bool)[:n_agents]
                         for r in batch_tel
                     ])
-                    self._resize_and_write(agent_valid_ds, total_rows, mat_valid)
+                    self._resize_and_write(
+                        agent_valid_ds, total_rows, mat_valid)
 
                     total_rows += n_new
                     print(f" ✓ ({n_new} steps, total={total_rows})")
@@ -351,8 +368,10 @@ def main():
     parser = argparse.ArgumentParser(
         description="Harvest Wayformer residual stream activations for SAE training."
     )
-    parser.add_argument("--run_dir", required=True, help="Path to training run directory")
-    parser.add_argument("--dataset", required=True, help="Dataset path or name")
+    parser.add_argument("--run_dir", required=True,
+                        help="Path to training run directory")
+    parser.add_argument("--dataset", required=True,
+                        help="Dataset path or name")
     parser.add_argument("--n_scenarios", type=int, default=500)
     parser.add_argument("--output", default="harvest.h5")
     parser.add_argument("--checkpoint", default="model_final.pkl")
@@ -360,7 +379,8 @@ def main():
     args = parser.parse_args()
 
     cfg = SAEConfig(sae_expansion_factor=args.expansion_factor)
-    harvester = ActivationHarvester(args.run_dir, args.dataset, cfg, args.checkpoint)
+    harvester = ActivationHarvester(
+        args.run_dir, args.dataset, cfg, args.checkpoint)
     harvester.setup()
     harvester.run_harvest(args.n_scenarios, args.output)
 

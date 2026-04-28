@@ -11,7 +11,7 @@ For each SAE latent dimension j (out of F = D * expansion_factor):
 Outputs a JSON file with per-feature annotations and a summary.
 
 Usage:
-    python -m xai.sae_interpretability.feature_annotator \\
+    python -m sae_interpretability.feature_annotator \\
         --data harvest.h5 \\
         --sae_checkpoint sae_model.pt \\
         --top_k 50 \\
@@ -55,7 +55,8 @@ def _load_telemetry(hf: h5py.File) -> Dict[str, np.ndarray]:
     for k in _BOOL_TEL_KEYS:
         path = f'telemetry/{k}'
         if path in hf:
-            tel[k] = hf[path][:].astype(np.float32)  # float for z-score arithmetic
+            # float for z-score arithmetic
+            tel[k] = hf[path][:].astype(np.float32)
 
     for k, stats in _AGENT_KEYS_TO_SUMMARIZE:
         path = f'telemetry/{k}'
@@ -91,9 +92,11 @@ def annotate(
     Returns:
         Sorted list of annotation dicts (active features first, then dead).
     """
-    model = SparseAutoencoder.from_checkpoint(sae_checkpoint, map_location='cpu')
+    model = SparseAutoencoder.from_checkpoint(
+        sae_checkpoint, map_location='cpu')
     model.eval()
-    print(f"[Annotator] SAE: {model.input_dim}D → {model.latent_dim}D  ({sae_checkpoint})")
+    print(
+        f"[Annotator] SAE: {model.input_dim}D → {model.latent_dim}D  ({sae_checkpoint})")
 
     print(f"[Annotator] Loading data from {data_path}")
     with h5py.File(data_path, 'r') as hf:
@@ -106,12 +109,14 @@ def annotate(
     # Apply the same mean-centering used during training
     act_mean: Optional[np.ndarray] = None
     try:
-        ckpt = torch.load(sae_checkpoint, map_location='cpu', weights_only=False)
+        ckpt = torch.load(sae_checkpoint, map_location='cpu',
+                          weights_only=False)
         act_mean = ckpt.get('act_mean', None)
     except Exception:
         pass
 
-    act_in = (activations - act_mean).astype(np.float32) if act_mean is not None else activations.astype(np.float32)
+    act_in = (activations - act_mean).astype(
+        np.float32) if act_mean is not None else activations.astype(np.float32)
 
     # Encode in batches to avoid OOM
     x = torch.from_numpy(act_in)
@@ -122,10 +127,12 @@ def annotate(
     features = np.concatenate(chunks, axis=0)  # [N, F]
 
     F_dim = features.shape[1]
-    print(f"[Annotator] Encoded → {features.shape}. Annotating {F_dim} features...")
+    print(
+        f"[Annotator] Encoded → {features.shape}. Annotating {F_dim} features...")
 
     # Global stats for each telemetry field
-    global_stats = {k: (float(v.mean()), float(v.std()) + 1e-8) for k, v in tel.items()}
+    global_stats = {k: (float(v.mean()), float(v.std()) + 1e-8)
+                    for k, v in tel.items()}
 
     annotations: List[Dict[str, Any]] = []
     n_active = 0
@@ -135,7 +142,8 @@ def annotate(
         n_nonzero = int((feat_j > 0).sum())
 
         if n_nonzero < min_activations:
-            annotations.append({'feature_idx': j, 'label': 'dead', 'n_activations': n_nonzero})
+            annotations.append(
+                {'feature_idx': j, 'label': 'dead', 'n_activations': n_nonzero})
             continue
 
         n_active += 1
@@ -149,7 +157,8 @@ def annotate(
             g_mean, g_std = global_stats[k]
             z_scores[k] = round((topk_mean - g_mean) / g_std, 4)
 
-        ranked = sorted(z_scores.items(), key=lambda kv: abs(kv[1]), reverse=True)
+        ranked = sorted(z_scores.items(),
+                        key=lambda kv: abs(kv[1]), reverse=True)
         top_field, top_z = ranked[0]
         direction = "high" if top_z > 0 else "low"
         label = f"{direction}_{top_field} (z={top_z:+.2f})"
@@ -163,7 +172,8 @@ def annotate(
             'all_z_scores': z_scores,
         })
 
-    print(f"[Annotator] {n_active}/{F_dim} features active (≥{min_activations} activations)")
+    print(
+        f"[Annotator] {n_active}/{F_dim} features active (≥{min_activations} activations)")
 
     active = sorted(
         [a for a in annotations if a['label'] != 'dead'],
@@ -179,14 +189,17 @@ def annotate(
         'dead_features': F_dim - n_active,
         'dead_pct': round(100.0 * (F_dim - n_active) / F_dim, 2),
         'top_10_features': [
-            {'idx': a['feature_idx'], 'label': a['label'], 'n_activations': a['n_activations']}
+            {'idx': a['feature_idx'], 'label': a['label'],
+                'n_activations': a['n_activations']}
             for a in active[:10]
         ],
     }
 
-    os.makedirs(os.path.dirname(os.path.abspath(output_path)) or '.', exist_ok=True)
+    os.makedirs(os.path.dirname(os.path.abspath(output_path))
+                or '.', exist_ok=True)
     with open(output_path, 'w') as f:
-        json.dump({'summary': summary, 'annotations': sorted_annotations}, f, indent=2)
+        json.dump(
+            {'summary': summary, 'annotations': sorted_annotations}, f, indent=2)
 
     print(f"[Annotator] Saved → {output_path}")
     _print_top_features(active[:10])
@@ -196,13 +209,15 @@ def annotate(
 def _print_top_features(features: List[Dict[str, Any]]) -> None:
     print("\n--- Top 10 Most Active Features ---")
     for ann in features:
-        print(f"  [{ann['feature_idx']:4d}] n={ann['n_activations']:5d}  {ann['label']}")
+        print(
+            f"  [{ann['feature_idx']:4d}] n={ann['n_activations']:5d}  {ann['label']}")
         for entry in ann.get('top_correlated_fields', [])[:3]:
             print(f"           {entry['field']}: z={entry['z']:+.2f}")
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Annotate SAE features via telemetry z-scores.")
+    parser = argparse.ArgumentParser(
+        description="Annotate SAE features via telemetry z-scores.")
     parser.add_argument("--data", required=True)
     parser.add_argument("--sae_checkpoint", required=True)
     parser.add_argument("--top_k", type=int, default=50)
@@ -210,7 +225,8 @@ def main():
     parser.add_argument("--min_activations", type=int, default=10)
     args = parser.parse_args()
 
-    annotate(args.data, args.sae_checkpoint, args.top_k, args.output, args.min_activations)
+    annotate(args.data, args.sae_checkpoint, args.top_k,
+             args.output, args.min_activations)
 
 
 if __name__ == "__main__":

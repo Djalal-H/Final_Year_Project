@@ -19,7 +19,7 @@ A large Δvalue that scales monotonically with α confirms that feature j
 causally drives the agent's value estimate.
 
 Usage:
-    python -m xai.sae_interpretability.causal_steering \\
+    python -m sae_interpretability.causal_steering \\
         --run_dir ../../runs/PPO_VEC_WAYFORMER \\
         --dataset ../../training.tfrecord \\
         --sae_checkpoint sae_model.pt \\
@@ -28,6 +28,9 @@ Usage:
 """
 
 from __future__ import annotations
+from sae_interpretability.sae_model import SparseAutoencoder
+from sae_interpretability.config import SAEConfig
+from xai.attention_analysis.offline_extraction import OfflineExtractor
 
 import argparse
 import json
@@ -40,13 +43,10 @@ import jax.numpy as jnp
 import numpy as np
 import torch
 
-project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../.."))
+project_root = os.path.abspath(os.path.join(
+    os.path.dirname(__file__), "../../.."))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
-
-from xai.attention_analysis.offline_extraction import OfflineExtractor
-from sae_interpretability.config import SAEConfig
-from sae_interpretability.sae_model import SparseAutoencoder
 
 
 class CausalSteerer(OfflineExtractor):
@@ -83,7 +83,8 @@ class CausalSteerer(OfflineExtractor):
     def _load_sae_weights(self):
         """Load the trained SAE checkpoint and convert weights to JAX arrays."""
         print(f"[Steerer] Loading SAE from {self.sae_checkpoint}")
-        ckpt = torch.load(self.sae_checkpoint, map_location='cpu', weights_only=False)
+        ckpt = torch.load(self.sae_checkpoint,
+                          map_location='cpu', weights_only=False)
         sae = SparseAutoencoder(
             input_dim=ckpt['config']['input_dim'],
             latent_dim=ckpt['config']['latent_dim'],
@@ -93,7 +94,8 @@ class CausalSteerer(OfflineExtractor):
         np_w = sae.to_numpy_weights()
         self._sae_w = {k: jnp.array(v) for k, v in np_w.items()}
 
-        act_mean_np = ckpt.get('act_mean', np.zeros(ckpt['config']['input_dim'], dtype=np.float32))
+        act_mean_np = ckpt.get('act_mean', np.zeros(
+            ckpt['config']['input_dim'], dtype=np.float32))
         self._act_mean_jnp = jnp.array(act_mean_np.squeeze())
         print(
             f"[Steerer] SAE ready: "
@@ -188,8 +190,10 @@ class CausalSteerer(OfflineExtractor):
         }
 
         h_batch = h[None]  # [1, D] for FC heads
-        policy_base = self._apply_fc_head(h_batch, self._policy_fc_params, self._policy_dense_params)
-        value_base = self._apply_fc_head(h_batch, self._value_fc_params, self._value_dense_params)
+        policy_base = self._apply_fc_head(
+            h_batch, self._policy_fc_params, self._policy_dense_params)
+        value_base = self._apply_fc_head(
+            h_batch, self._value_fc_params, self._value_dense_params)
 
         for alpha in temperatures:
             f_steered = f_baseline.at[feature_idx].add(alpha)
@@ -216,7 +220,8 @@ class CausalSteerer(OfflineExtractor):
                     jnp.linalg.norm(policy_steered - policy_base)
                 )
             if value_base is not None and value_steered is not None:
-                entry['delta_value'] = float(jnp.mean(value_steered - value_base))
+                entry['delta_value'] = float(
+                    jnp.mean(value_steered - value_base))
 
             result['temperatures'].append(entry)
 
@@ -291,9 +296,11 @@ class CausalSteerer(OfflineExtractor):
             ),
         }
 
-        os.makedirs(os.path.dirname(os.path.abspath(output_path)) or '.', exist_ok=True)
+        os.makedirs(os.path.dirname(os.path.abspath(output_path))
+                    or '.', exist_ok=True)
         with open(output_path, 'w') as f:
-            json.dump({'summary': summary, 'per_scenario': all_results}, f, indent=2)
+            json.dump(
+                {'summary': summary, 'per_scenario': all_results}, f, indent=2)
 
         print(f"\n[Steerer] Results → {output_path}")
         print("  Mean Δvalue per α:")
@@ -306,12 +313,14 @@ class CausalSteerer(OfflineExtractor):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Causal steering experiment on SAE features.")
+    parser = argparse.ArgumentParser(
+        description="Causal steering experiment on SAE features.")
     parser.add_argument("--run_dir", required=True)
     parser.add_argument("--dataset", required=True)
     parser.add_argument("--sae_checkpoint", required=True)
     parser.add_argument("--feature_idx", type=int, required=True)
-    parser.add_argument("--temperatures", type=float, nargs="+", default=[0.5, 1.0, 2.0, 5.0])
+    parser.add_argument("--temperatures", type=float,
+                        nargs="+", default=[0.5, 1.0, 2.0, 5.0])
     parser.add_argument("--n_scenarios", type=int, default=10)
     parser.add_argument("--output", default="steering_results.json")
     parser.add_argument("--checkpoint", default="model_final.pkl")
