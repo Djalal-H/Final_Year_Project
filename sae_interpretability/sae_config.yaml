@@ -11,3 +11,28 @@ harvest_n_scenarios: 500
 harvest_dt: 0.1
 ttc_critical_threshold: 1.5
 hard_braking_g_threshold: 0.4
+
+# ---------------------------------------------------------------------------
+# Hyperparameter tuning grid (used by sae_tuner.py)
+#
+# The Cartesian product of all lists below defines the full search space.
+# l1_coeff is the most critical knob: 1e-3 collapsed to L0=0.3, so we
+# sweep 2 orders of magnitude below it.  Target: L0 in the 5-20 range.
+# ---------------------------------------------------------------------------
+tune:
+  # Sparsity penalty — primary knob for controlling L0
+  l1_coeff:
+    - 1.0e-5   # very permissive → expect L0 ~20-50
+    - 5.0e-5   # permissive     → expect L0 ~10-20  (likely sweet spot)
+    - 1.0e-4   # moderate       → expect L0 ~5-10
+    - 5.0e-4   # aggressive     → may still collapse (L0 < 2)
+
+  # Expansion factor — width of the sparse latent space
+  expansion_factor:
+    - 16       # 128 → 2048  (default)
+    - 32       # 128 → 4096  (more room for monosemantic features)
+
+  # Training duration
+  epochs:
+    - 20       # more epochs to let the L1 loss fully sculpt sparsity
+    - 30
