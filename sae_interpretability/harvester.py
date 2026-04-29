@@ -179,6 +179,342 @@ class ActivationHarvester(OfflineExtractor):
     # Main harvesting entry point
     # ------------------------------------------------------------------
 
+    # ------------------------------------------------------------------
+    # Fast path: jax.lax.scan over timesteps
+    # ------------------------------------------------------------------
+
+    def _compute_telemetry_vectorized(
+        self,
+        raw: Dict[str, np.ndarray],
+        valid_steps: np.ndarray,
+    ) -> Dict[str, Any]:
+        """Compute all telemetry for T steps in one vectorized numpy pass.
+
+        Args:
+            raw: Dict of stacked arrays from jax.device_get after scan.
+                 Keys: x_t, y_t, vx_t, vy_t, yaw_t, valid_t, is_sdc.
+                 Shapes: [T, n_objects] each.
+            valid_steps: bool [T] mask — False for post-termination steps.
+
+        Returns:
+            Dict matching the keys expected by the HDF5 writer.
+        """
+        TTC_HORIZON = self.TTC_HORIZON
+        n_v = self._n_vehicles
+
+        x   = raw['x_t']          # [T, n_objects]
+        y   = raw['y_t']
+        vx  = raw['vx_t']
+        vy  = raw['vy_t']
+        yaw = raw['yaw_t']
+        valid_agents = raw['valid_t'].astype(bool)  # [T, n_objects]
+        is_sdc = raw['is_sdc']                       # [T, n_objects]
+
+        sdc_idx = int(np.argmax(is_sdc[0]))
+
+        # ---- Ego state ------------------------------------------------
+        ego_x   = x[:, sdc_idx]          # [T]
+        ego_y   = y[:, sdc_idx]
+        ego_vx  = vx[:, sdc_idx]
+        ego_vy  = vy[:, sdc_idx]
+        ego_yaw = yaw[:, sdc_idx]
+        ego_speed = np.sqrt(ego_vx**2 + ego_vy**2)   # [T]
+
+        # ---- Per-agent (first n_v agents) -----------------------------
+        x_v  = x[:, :n_v]          # [T, n_v]
+        y_v  = y[:, :n_v]
+        vx_v = vx[:, :n_v]
+        vy_v = vy[:, :n_v]
+        valid_v = valid_agents[:, :n_v]  # [T, n_v]
+
+        dx = x_v - ego_x[:, None]       # [T, n_v]
+        dy = y_v - ego_y[:, None]
+        dist = np.sqrt(dx**2 + dy**2)   # [T, n_v]
+
+        rel_vx = vx_v - ego_vx[:, None]
+        rel_vy = vy_v - ego_vy[:, None]
+        dist_safe = dist + 1e-6
+        closing = -(dx * rel_vx + dy * rel_vy) / dist_safe  # [T, n_v]
+
+        ttc = np.where(
+            closing > 0.5,
+            dist / (closing + 1e-6),
+            TTC_HORIZON,
+        )
+        ttc = np.clip(ttc, 0.0, TTC_HORIZON)   # [T, n_v]
+
+        # Spatial (ego-local frame)
+        cos_y = np.cos(-ego_yaw)[:, None]       # [T, 1]
+        sin_y = np.sin(-ego_yaw)[:, None]
+        x_local =  dx * cos_y - dy * sin_y
+        y_local =  dx * sin_y + dy * cos_y
+
+        is_ahead = (x_local >  2.0).astype(np.float32)   # [T, n_v]
+        is_left  = (y_local >  1.0).astype(np.float32)
+
+        agent_speeds = np.sqrt(vx_v**2 + vy_v**2)   # [T, n_v]
+
+        # ---- Scalar summaries -----------------------------------------
+        # min TTC over valid non-ego agents
+        inf_val = np.full_like(ttc, TTC_HORIZON)
+        ttc_valid = np.where(valid_v, ttc, inf_val)  # [T, n_v]
+        min_ttc = ttc_valid.min(axis=1)              # [T]
+
+        dist_valid = np.where(valid_v, dist, np.full_like(dist, 999.0))
+        min_dist = dist_valid.min(axis=1)            # [T]
+
+        # ---- Boolean events -------------------------------------------
+        is_ttc_critical = min_ttc < self.sae_cfg.ttc_critical_threshold  # [T]
+
+        # Hard braking: speed drop of lead ahead agent > threshold in 1 step
+        threshold = self.sae_cfg.hard_braking_g_threshold * self.G * self.sae_cfg.harvest_dt
+        ahead_and_valid = is_ahead.astype(bool) & valid_v  # [T, n_v]
+        # Lead vehicle index per step: argmin distance among ahead+valid
+        dist_lead = np.where(ahead_and_valid, dist, np.full_like(dist, np.inf))
+        lead_idx = dist_lead.argmin(axis=1)          # [T]
+        lead_speed = agent_speeds[np.arange(len(lead_idx)), lead_idx]  # [T]
+        # Hard braking at step t: lead speed drops from t-1 → t
+        speed_drop = np.concatenate([[0.0], lead_speed[:-1] - lead_speed[1:]])
+        is_hard_braking = (speed_drop > threshold) & ahead_and_valid[
+            np.arange(len(lead_idx)), lead_idx]      # [T]
+
+        # ---- Ego position (for HDF5 scalar keys) ----------------------
+        ego_pos_x = x[:, sdc_idx]
+        ego_pos_y = y[:, sdc_idx]
+
+        return {
+            # scalars [T]
+            'ego_speed':          ego_speed.astype(np.float32),
+            'ego_x':              ego_pos_x.astype(np.float32),
+            'ego_y':              ego_pos_y.astype(np.float32),
+            'min_ttc':            min_ttc.astype(np.float32),
+            'min_agent_dist':     min_dist.astype(np.float32),
+            # booleans [T]
+            'is_ttc_critical':             is_ttc_critical,
+            'is_lead_vehicle_hard_braking': is_hard_braking,
+            # per-agent [T, n_v]
+            'agent_dists':          dist.astype(np.float32),
+            'agent_ttcs':           ttc.astype(np.float32),
+            'agent_speeds':         agent_speeds.astype(np.float32),
+            'agent_is_ahead':       is_ahead,
+            'agent_is_left':        is_left,
+            'agent_closing_speed':  closing.astype(np.float32),
+            'agent_valid':          valid_v,
+        }
+
+    def run_harvest_fast(self, n_scenarios: int, output_path: str) -> None:
+        """Fast harvest using jax.lax.scan — eliminates the Python timestep loop.
+
+        Design mirrors evaluate.py's jax.lax.while_loop approach:
+          1. jax.lax.scan compiles the full T-step episode into one XLA kernel.
+          2. Raw trajectory arrays are stacked automatically by scan.
+          3. A single jax.device_get per scenario moves all data to the host.
+          4. Telemetry is computed in one vectorized numpy pass.
+
+        Args:
+            n_scenarios: Number of scenarios to process.
+            output_path: Destination HDF5 file path.
+        """
+        from functools import partial as ft_partial
+        from vmax.simulator import make_data_generator, datasets
+        from vmax.agents import pipeline
+
+        if self.encoder is None:
+            self.setup()
+
+        data_gen = make_data_generator(
+            path=datasets.get_dataset(self.dataset_path),
+            max_num_objects=self.config["max_num_objects"],
+            include_sdc_paths=not self.config.get("waymo_dataset", False),
+            batch_dims=(1,),   # must stay 1 — telemetry is per-scenario
+            seed=42,
+            repeat=1,
+        )
+
+        T = self.sae_cfg.harvest_max_timesteps
+        D = self.sae_cfg.wayformer_hidden_dim
+        encoder        = self.encoder
+        encoder_params = self.encoder_params
+        env            = self.env
+
+        # JAX-traceable expert step (same function evaluate.py uses)
+        _expert_step = jax.jit(ft_partial(pipeline.expert_step, env=env))
+        _reset       = jax.jit(env.reset)
+
+        # ------------------------------------------------------------------
+        # scan body — MUST be a pure JAX function (no Python control flow
+        # on traced values).  Returns (carry, per_step_outputs).
+        # ------------------------------------------------------------------
+        def _scan_body(env_transition, _):
+            obs = env_transition.observation          # [1, obs_dim]
+
+            # Encoder forward pass
+            latent, _ = encoder.apply({'params': encoder_params}, obs)
+            latent = latent[0]                        # squeeze batch → [D]
+
+            # Raw trajectory snapshot at the *current* sim timestep
+            state = env_transition.state
+            traj  = state.sim_trajectory
+            ts    = jnp.squeeze(state.timestep).astype(jnp.int32)
+
+            # traj.x shape: [1, n_objects, total_T]  → slice [n_objects]
+            x_t    = traj.x[0, :, ts]
+            y_t    = traj.y[0, :, ts]
+            vx_t   = traj.vel_x[0, :, ts]
+            vy_t   = traj.vel_y[0, :, ts]
+            yaw_t  = traj.yaw[0, :, ts]
+            valid_t = traj.valid[0, :, ts]
+            is_sdc  = state.object_metadata.is_sdc[0]  # [n_objects]
+
+            done = env_transition.done  # [1] bool — True if episode ended
+
+            # Step the environment (expert log-replay, deterministic)
+            env_transition, _ = _expert_step(
+                env_transition, key=jax.random.PRNGKey(0))
+
+            return env_transition, {
+                'latent':  latent,    # [D]
+                'x_t':     x_t,       # [n_objects]
+                'y_t':     y_t,
+                'vx_t':    vx_t,
+                'vy_t':    vy_t,
+                'yaw_t':   yaw_t,
+                'valid_t': valid_t,
+                'is_sdc':  is_sdc,
+                'done':    done,      # [1]
+            }
+
+        # JIT-compile the full episode scan once
+        @jax.jit
+        def _run_episode(init_transition):
+            _, outputs = jax.lax.scan(
+                _scan_body, init_transition, None, length=T)
+            return outputs
+
+        # ------------------------------------------------------------------
+        # HDF5 setup
+        # ------------------------------------------------------------------
+        os.makedirs(os.path.dirname(os.path.abspath(output_path)) or '.', exist_ok=True)
+        total_rows = 0
+        n_v = self._n_vehicles
+
+        with h5py.File(output_path, 'w') as hf:
+            act_ds = hf.create_dataset('activations', shape=(0, D),
+                                       maxshape=(None, D), dtype='float32',
+                                       chunks=(4096, D))
+            sid_ds = hf.create_dataset('scenario_ids', shape=(0,),
+                                       maxshape=(None,), dtype='int32',
+                                       chunks=(4096,))
+            ts_ds  = hf.create_dataset('timesteps', shape=(0,),
+                                       maxshape=(None,), dtype='int32',
+                                       chunks=(4096,))
+            scalar_ds = {
+                k: hf.create_dataset(f'telemetry/{k}', shape=(0,),
+                                     maxshape=(None,), dtype='float32',
+                                     chunks=(4096,))
+                for k in _SCALAR_KEYS
+            }
+            bool_ds = {
+                k: hf.create_dataset(f'telemetry/{k}', shape=(0,),
+                                     maxshape=(None,), dtype='bool',
+                                     chunks=(4096,))
+                for k in _BOOL_KEYS
+            }
+            agent_float_ds: Dict[str, h5py.Dataset] = {}
+            agent_valid_ds: Optional[h5py.Dataset]  = None
+
+            print(f"[Harvester-fast] Processing {n_scenarios} scenarios → {output_path}")
+
+            for scenario_idx, scenario_batch in enumerate(data_gen):
+                if scenario_idx >= n_scenarios:
+                    break
+
+                print(f"  Scenario {scenario_idx + 1}/{n_scenarios}",
+                      end="", flush=True)
+
+                try:
+                    init_transition = _reset(scenario_batch)
+
+                    # ---- One compiled call for the entire episode ----
+                    raw = _run_episode(init_transition)
+
+                    # ---- Single device_get — all T steps at once -----
+                    raw_np: Dict[str, np.ndarray] = jax.device_get(raw)
+
+                    # ---- Build valid-step mask ------------------------
+                    # done[t]=True means the episode ENDED at step t.
+                    # We keep steps where done was still False on entry.
+                    done_np = raw_np['done'].squeeze(-1).astype(bool)  # [T]
+                    # valid until (and including) the first done step
+                    first_done = int(np.argmax(done_np)) if done_np.any() else T
+                    valid_steps = np.zeros(T, dtype=bool)
+                    valid_steps[:first_done] = True
+
+                    n_new = int(valid_steps.sum())
+                    if n_new == 0:
+                        print(" ✗ empty")
+                        continue
+
+                    # ---- Vectorized telemetry in numpy ---------------
+                    tel = self._compute_telemetry_vectorized(raw_np, valid_steps)
+
+                    # Slice to valid timesteps only
+                    latents = raw_np['latent'][valid_steps]   # [n_new, D]
+                    ts_arr  = np.where(valid_steps)[0].astype(np.int32)
+
+                    # ---- Bulk HDF5 write (once per scenario) ---------
+                    self._resize_and_write(act_ds, total_rows, latents)
+                    self._resize_and_write(sid_ds, total_rows,
+                                           np.full(n_new, scenario_idx, dtype='int32'))
+                    self._resize_and_write(ts_ds,  total_rows, ts_arr)
+
+                    for k in _SCALAR_KEYS:
+                        self._resize_and_write(scalar_ds[k], total_rows,
+                                               tel[k][valid_steps])
+                    for k in _BOOL_KEYS:
+                        self._resize_and_write(bool_ds[k], total_rows,
+                                               tel[k][valid_steps])
+
+                    for k in _AGENT_FLOAT_KEYS:
+                        if k not in agent_float_ds:
+                            agent_float_ds[k] = hf.create_dataset(
+                                f'telemetry/{k}', shape=(0, n_v),
+                                maxshape=(None, n_v), dtype='float32',
+                                chunks=(4096, n_v))
+                        self._resize_and_write(
+                            agent_float_ds[k], total_rows,
+                            tel[k][valid_steps].astype(np.float32))
+
+                    if agent_valid_ds is None:
+                        agent_valid_ds = hf.create_dataset(
+                            'telemetry/agent_valid', shape=(0, n_v),
+                            maxshape=(None, n_v), dtype='bool',
+                            chunks=(4096, n_v))
+                    self._resize_and_write(
+                        agent_valid_ds, total_rows,
+                        tel['agent_valid'][valid_steps])
+
+                    total_rows += n_new
+                    print(f" ✓ ({n_new} steps, total={total_rows})")
+
+                except Exception as e:
+                    print(f" ✗ {e}")
+                    traceback.print_exc()
+
+            meta = hf.create_group('metadata')
+            meta.attrs['checkpoint']            = self.checkpoint_name
+            meta.attrs['run_dir']               = self.run_dir
+            meta.attrs['n_scenarios_requested'] = n_scenarios
+            meta.attrs['n_rows']                = total_rows
+            meta.attrs['hidden_dim']            = D
+            meta.attrs['sae_expansion_factor']  = self.sae_cfg.sae_expansion_factor
+            meta.attrs['ttc_critical_threshold'] = self.sae_cfg.ttc_critical_threshold
+            meta.attrs['hard_braking_g_threshold'] = self.sae_cfg.hard_braking_g_threshold
+            meta.attrs['harvester_mode']        = 'fast_scan'
+
+        print(f"\n[Harvester-fast] Done. {total_rows} rows → {output_path}")
+        print(f"  File size: {os.path.getsize(output_path) / 1e6:.1f} MB")
+
     def run_harvest(self, n_scenarios: int, output_path: str) -> None:
         """Process n_scenarios and write activations + telemetry to HDF5.
 
@@ -376,13 +712,19 @@ def main():
     parser.add_argument("--output", default="harvest.h5")
     parser.add_argument("--checkpoint", default="model_final.pkl")
     parser.add_argument("--expansion_factor", type=int, default=16)
+    parser.add_argument(
+        "--fast", action="store_true",
+        help="Use jax.lax.scan episode loop (much faster, identical output)")
     args = parser.parse_args()
 
     cfg = SAEConfig(sae_expansion_factor=args.expansion_factor)
     harvester = ActivationHarvester(
         args.run_dir, args.dataset, cfg, args.checkpoint)
     harvester.setup()
-    harvester.run_harvest(args.n_scenarios, args.output)
+    if args.fast:
+        harvester.run_harvest_fast(args.n_scenarios, args.output)
+    else:
+        harvester.run_harvest(args.n_scenarios, args.output)
 
 
 if __name__ == "__main__":
