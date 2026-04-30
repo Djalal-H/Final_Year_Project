@@ -106,17 +106,23 @@ def annotate(
     N, D = activations.shape
     print(f"[Annotator] {N:,} rows, {D} dims, {len(tel)} telemetry fields")
 
-    # Apply the same mean-centering used during training
+    # Apply the same whitening used during training (mean subtract + std divide)
     act_mean: Optional[np.ndarray] = None
+    act_std: Optional[np.ndarray] = None
     try:
         ckpt = torch.load(sae_checkpoint, map_location='cpu',
                           weights_only=False)
         act_mean = ckpt.get('act_mean', None)
+        act_std  = ckpt.get('act_std',  None)
     except Exception:
         pass
 
-    act_in = (activations - act_mean).astype(
-        np.float32) if act_mean is not None else activations.astype(np.float32)
+    if act_mean is not None and act_std is not None:
+        act_in = ((activations - act_mean) / act_std).astype(np.float32)
+    elif act_mean is not None:
+        act_in = (activations - act_mean).astype(np.float32)
+    else:
+        act_in = activations.astype(np.float32)
 
     # Encode in batches to avoid OOM
     x = torch.from_numpy(act_in)

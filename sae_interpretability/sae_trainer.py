@@ -106,7 +106,7 @@ def train(data_path: str, output_path: str, cfg: SAEConfig) -> SparseAutoencoder
             with torch.no_grad():
                 recon = torch.nn.functional.mse_loss(x_hat, batch).item()
                 l1 = features.abs().mean().item()
-                l0 = (features > 0).float().mean().item()
+                l0 = (features > 0).float().sum(dim=-1).mean().item()
 
             total_recon += recon
             total_l1 += l1
@@ -127,7 +127,7 @@ def train(data_path: str, output_path: str, cfg: SAEConfig) -> SparseAutoencoder
         if avg_loss < best_loss:
             best_loss = avg_loss
             _save_checkpoint(model, cfg, output_path,
-                             act_mean, epoch, best_loss)
+                             act_mean, act_std, epoch, best_loss)
 
         print(
             f"Epoch {epoch:3d}/{cfg.sae_epochs}  "
@@ -148,6 +148,7 @@ def _save_checkpoint(
     cfg: SAEConfig,
     path: str,
     act_mean: np.ndarray,
+    act_std: np.ndarray,
     epoch: int,
     loss: float,
 ):
@@ -161,6 +162,7 @@ def _save_checkpoint(
                 'jump_threshold': model.jump_threshold,
             },
             'act_mean': act_mean,
+            'act_std':  act_std,
             'epoch': epoch,
             'loss': loss,
         },

@@ -1,5 +1,5 @@
 wayformer_hidden_dim: 128
-sae_expansion_factor: 16
+sae_expansion_factor: 1
 sae_l1_coeff: 0.0003
 sae_learning_rate: 0.0003
 sae_batch_size: 4096

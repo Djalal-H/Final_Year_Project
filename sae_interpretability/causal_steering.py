@@ -69,6 +69,7 @@ class CausalSteerer(OfflineExtractor):
         self.sae_cfg = cfg
         self._sae_w: Optional[Dict[str, jnp.ndarray]] = None
         self._act_mean_jnp: Optional[jnp.ndarray] = None
+        self._act_std_jnp:  Optional[jnp.ndarray] = None
         self._policy_fc_params = None
         self._policy_dense_params = None
         self._value_fc_params = None
@@ -94,9 +95,11 @@ class CausalSteerer(OfflineExtractor):
         np_w = sae.to_numpy_weights()
         self._sae_w = {k: jnp.array(v) for k, v in np_w.items()}
 
-        act_mean_np = ckpt.get('act_mean', np.zeros(
-            ckpt['config']['input_dim'], dtype=np.float32))
+        input_dim = ckpt['config']['input_dim']
+        act_mean_np = ckpt.get('act_mean', np.zeros(input_dim, dtype=np.float32))
+        act_std_np  = ckpt.get('act_std',  np.ones(input_dim,  dtype=np.float32))
         self._act_mean_jnp = jnp.array(act_mean_np.squeeze())
+        self._act_std_jnp  = jnp.array(act_std_np.squeeze())
         print(
             f"[Steerer] SAE ready: "
             f"{ckpt['config']['input_dim']}D → {ckpt['config']['latent_dim']}D"
@@ -119,7 +122,7 @@ class CausalSteerer(OfflineExtractor):
 
     def _sae_encode(self, h: jnp.ndarray) -> jnp.ndarray:
         w = self._sae_w
-        return jnp.maximum((h - self._act_mean_jnp) @ w['W_enc'] + w['b_enc'], 0.0)
+        return jnp.maximum(((h - self._act_mean_jnp) / self._act_std_jnp) @ w['W_enc'] + w['b_enc'], 0.0)
 
     def _sae_decode(self, f: jnp.ndarray) -> jnp.ndarray:
         w = self._sae_w
