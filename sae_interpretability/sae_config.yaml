@@ -1,9 +1,9 @@
 wayformer_hidden_dim: 128
 sae_expansion_factor: 16
-sae_l1_coeff: 0.001
+sae_l1_coeff: 0.0003
 sae_learning_rate: 0.0003
 sae_batch_size: 4096
-sae_epochs: 10
+sae_epochs: 30
 top_k_activations: 50
 steering_temperatures: [0.5, 1.0, 2.0, 5.0]
 harvest_max_timesteps: 80
