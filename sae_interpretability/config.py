@@ -71,6 +71,7 @@ class SAEConfig:
     hard_braking_g_threshold: float = 0.4   # g-force
 
     # SAE activation function
+    use_jump_relu: bool = False
     jump_threshold: float = 0.001  # JumpReLU hard gate threshold θ
 
     @property

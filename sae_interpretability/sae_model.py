@@ -85,12 +85,14 @@ class SparseAutoencoder(nn.Module):
         latent_dim: int,
         l1_coeff: float = 1e-3,
         jump_threshold: float = 0.001,
+        use_jump_relu: bool = True,
     ):
         super().__init__()
         self.input_dim = input_dim
         self.latent_dim = latent_dim
         self.l1_coeff = l1_coeff
         self.jump_threshold = jump_threshold
+        self.use_jump_relu = use_jump_relu
 
         # Pre-encoder bias: learned center of the residual stream distribution
         self.pre_bias = nn.Parameter(torch.zeros(input_dim))
@@ -122,7 +124,9 @@ class SparseAutoencoder(nn.Module):
             Non-negative feature activations [B, F].
         """
         pre_act = (x - self.pre_bias) @ self.W_enc + self.b_enc
-        return jump_relu(pre_act, self.jump_threshold)
+        if self.use_jump_relu:
+            return jump_relu(pre_act, self.jump_threshold)
+        return F.relu(pre_act)
 
     def decode(self, f: torch.Tensor) -> torch.Tensor:
         """Decode sparse features back to residual stream space.
@@ -181,6 +185,7 @@ class SparseAutoencoder(nn.Module):
             latent_dim=cfg['latent_dim'],
             l1_coeff=cfg['l1_coeff'],
             jump_threshold=cfg.get('jump_threshold', 0.001),  # backward-compat
+            use_jump_relu=cfg.get('use_jump_relu', True),
         )
         model.load_state_dict(ckpt['model_state_dict'])
         return model
