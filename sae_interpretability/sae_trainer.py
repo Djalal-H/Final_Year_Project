@@ -53,8 +53,11 @@ def train(data_path: str, output_path: str, cfg: SAEConfig) -> SparseAutoencoder
     print(f"[Trainer] Dataset: {N:,} rows × {D} dims")
 
     # Mean-center: stored in checkpoint so annotation/steering can reproduce it
+    
     act_mean = activations.mean(axis=0, keepdims=True).astype(np.float32)
-    activations_centered = (activations - act_mean).astype(np.float32)
+    act_std  = activations.std(axis=0, keepdims=True).astype(np.float32) + 1e-8
+    activations_centered = ((activations - act_mean) / act_std).astype(np.float32)
+
     print(
         f"[Trainer] Activation mean norm: {np.linalg.norm(act_mean):.4f} (subtracted)")
 
@@ -68,10 +71,14 @@ def train(data_path: str, output_path: str, cfg: SAEConfig) -> SparseAutoencoder
     )
 
     latent_dim = hidden_dim * cfg.sae_expansion_factor
-    model = SparseAutoencoder(hidden_dim, latent_dim,
-                              cfg.sae_l1_coeff).to(device)
+    model = SparseAutoencoder(
+        hidden_dim, latent_dim,
+        l1_coeff=cfg.sae_l1_coeff,
+        jump_threshold=cfg.jump_threshold,
+    ).to(device)
     print(
-        f"[Trainer] SAE: {hidden_dim}D → {latent_dim}D (×{cfg.sae_expansion_factor})")
+        f"[Trainer] SAE: {hidden_dim}D → {latent_dim}D (×{cfg.sae_expansion_factor})  "
+        f"JumpReLU θ={cfg.jump_threshold}")
 
     optimizer = optim.Adam(model.parameters(), lr=cfg.sae_learning_rate)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(
@@ -148,9 +155,10 @@ def _save_checkpoint(
         {
             'model_state_dict': model.state_dict(),
             'config': {
-                'input_dim': model.input_dim,
-                'latent_dim': model.latent_dim,
-                'l1_coeff': model.l1_coeff,
+                'input_dim':      model.input_dim,
+                'latent_dim':     model.latent_dim,
+                'l1_coeff':       model.l1_coeff,
+                'jump_threshold': model.jump_threshold,
             },
             'act_mean': act_mean,
             'epoch': epoch,
@@ -170,6 +178,9 @@ def main():
     parser.add_argument("--epochs", type=int, default=10)
     parser.add_argument("--batch_size", type=int, default=4096)
     parser.add_argument("--lr", type=float, default=3e-4)
+    parser.add_argument(
+        "--jump_threshold", type=float, default=0.001,
+        help="JumpReLU hard threshold θ (default: 0.001)")
     args = parser.parse_args()
 
     cfg = SAEConfig(
@@ -178,6 +189,7 @@ def main():
         sae_epochs=args.epochs,
         sae_batch_size=args.batch_size,
         sae_learning_rate=args.lr,
+        jump_threshold=args.jump_threshold,
     )
     train(args.data, args.output, cfg)
 
