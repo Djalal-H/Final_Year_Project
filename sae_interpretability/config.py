@@ -1,13 +1,46 @@
-# Copyright 2025 Valeo.
+"""Pipeline-wide configuration for the SAE interpretability pipeline.
 
-"""Pipeline-wide configuration for the SAE interpretability pipeline."""
+SAEConfig defaults are automatically loaded from the sibling sae_config.yaml
+at import time.  Any field absent from the YAML falls back to its dataclass
+default, so the class always constructs successfully even if the YAML is
+missing or incomplete.
+
+Typical usage
+-------------
+# Uses sae_config.yaml next to this file — no arguments needed:
+cfg = SAEConfig.from_yaml()
+
+# Override a specific YAML file:
+cfg = SAEConfig.from_yaml("path/to/other_config.yaml")
+
+# Override individual fields after loading:
+cfg = SAEConfig.from_yaml()
+cfg.sae_l1_coeff = 1e-5
+"""
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from typing import List
 
 import yaml
+
+# ---------------------------------------------------------------------------
+# Path to the canonical YAML file (sibling of this module)
+# ---------------------------------------------------------------------------
+_DEFAULT_YAML = os.path.join(os.path.dirname(__file__), "sae_config.yaml")
+
+
+def _load_yaml_defaults(path: str) -> dict:
+    """Load YAML and return only keys that are valid SAEConfig fields."""
+    try:
+        with open(path) as f:
+            data = yaml.safe_load(f) or {}
+    except FileNotFoundError:
+        return {}
+    # Strip the 'tune' block and any other non-field keys at load time
+    return data
 
 
 @dataclass
@@ -45,8 +78,16 @@ class SAEConfig:
         return self.wayformer_hidden_dim * self.sae_expansion_factor
 
     @classmethod
-    def from_yaml(cls, path: str) -> SAEConfig:
-        with open(path) as f:
-            data = yaml.safe_load(f)
+    def from_yaml(cls, path: str = _DEFAULT_YAML) -> SAEConfig:
+        """Load config from a YAML file.
+
+        Args:
+            path: Path to the YAML file.  Defaults to the sibling
+                  ``sae_config.yaml`` so callers can write simply::
+
+                      cfg = SAEConfig.from_yaml()
+        """
+        raw = _load_yaml_defaults(path)
         valid_fields = {f.name for f in cls.__dataclass_fields__.values()}
-        return cls(**{k: v for k, v in data.items() if k in valid_fields})
+        filtered = {k: v for k, v in raw.items() if k in valid_fields}
+        return cls(**filtered)
