@@ -70,6 +70,8 @@ def _apply_overrides(base_cfg: SAEConfig,
         "learning_rate":   "sae_learning_rate",
         "batch_size":      "sae_batch_size",
         "epochs":          "sae_epochs",
+        "use_jump_relu":   "use_jump_relu",
+        "jump_threshold":  "jump_threshold",
     }
     for key, val in overrides.items():
         attr = _FIELD_MAP.get(key, key)   # fall back to raw key

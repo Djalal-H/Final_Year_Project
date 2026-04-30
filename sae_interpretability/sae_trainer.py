@@ -77,9 +77,10 @@ def train(data_path: str, output_path: str, cfg: SAEConfig) -> SparseAutoencoder
         jump_threshold=cfg.jump_threshold,
         use_jump_relu=cfg.use_jump_relu,
     ).to(device)
+    activation_name = f"JumpReLU(θ={cfg.jump_threshold})" if cfg.use_jump_relu else "ReLU"
     print(
         f"[Trainer] SAE: {hidden_dim}D → {latent_dim}D (×{cfg.sae_expansion_factor})  "
-        f"JumpReLU θ={cfg.jump_threshold}")
+        f"activation={activation_name}")
 
     optimizer = optim.Adam(model.parameters(), lr=cfg.sae_learning_rate)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(
