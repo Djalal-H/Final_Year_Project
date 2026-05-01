@@ -11,9 +11,6 @@ harvest_n_scenarios: 500
 harvest_dt: 0.1
 ttc_critical_threshold: 1.5
 hard_braking_g_threshold: 0.4
-use_jump_relu: false
-jump_threshold: 0.001  # JumpReLU hard gate threshold θ
-
 # ---------------------------------------------------------------------------
 # Hyperparameter tuning grid (used by sae_tuner.py)
 #

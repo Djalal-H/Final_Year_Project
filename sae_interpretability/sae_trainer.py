@@ -74,10 +74,8 @@ def train(data_path: str, output_path: str, cfg: SAEConfig) -> SparseAutoencoder
     model = SparseAutoencoder(
         hidden_dim, latent_dim,
         l1_coeff=cfg.sae_l1_coeff,
-        jump_threshold=cfg.jump_threshold,
-        use_jump_relu=cfg.use_jump_relu,
     ).to(device)
-    activation_name = f"JumpReLU(θ={cfg.jump_threshold})" if cfg.use_jump_relu else "ReLU"
+    activation_name = "ReLU"
     print(
         f"[Trainer] SAE: {hidden_dim}D → {latent_dim}D (×{cfg.sae_expansion_factor})  "
         f"activation={activation_name}")
@@ -161,8 +159,6 @@ def _save_checkpoint(
                 'input_dim':      model.input_dim,
                 'latent_dim':     model.latent_dim,
                 'l1_coeff':       model.l1_coeff,
-                'jump_threshold': model.jump_threshold,
-                'use_jump_relu':  model.use_jump_relu,
             },
             'act_mean': act_mean,
             'act_std':  act_std,
@@ -183,12 +179,6 @@ def main():
     parser.add_argument("--epochs", type=int, default=10)
     parser.add_argument("--batch_size", type=int, default=4096)
     parser.add_argument("--lr", type=float, default=3e-4)
-    parser.add_argument(
-        "--jump_threshold", type=float, default=0.001,
-        help="JumpReLU hard threshold θ (default: 0.001)")
-    parser.add_argument(
-        "--use_jump_relu", type=lambda x: str(x).lower() in ['true', '1', 'yes', 'y'], default=True,
-        help="Use JumpReLU instead of standard ReLU (default: True)")
     args = parser.parse_args()
 
     cfg = SAEConfig(
@@ -197,8 +187,6 @@ def main():
         sae_epochs=args.epochs,
         sae_batch_size=args.batch_size,
         sae_learning_rate=args.lr,
-        jump_threshold=args.jump_threshold,
-        use_jump_relu=args.use_jump_relu,
     )
     train(args.data, args.output, cfg)
 

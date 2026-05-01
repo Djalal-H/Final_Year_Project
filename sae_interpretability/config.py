@@ -70,10 +70,6 @@ class SAEConfig:
     ttc_critical_threshold: float = 1.5      # seconds
     hard_braking_g_threshold: float = 0.4   # g-force
 
-    # SAE activation function
-    use_jump_relu: bool = False
-    jump_threshold: float = 0.001  # JumpReLU hard gate threshold θ
-
     @property
     def sae_latent_dim(self) -> int:
         return self.wayformer_hidden_dim * self.sae_expansion_factor

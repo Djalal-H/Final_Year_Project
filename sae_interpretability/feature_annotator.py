@@ -1,5 +1,3 @@
-# Copyright 2025 Valeo.
-
 """Feature annotation via z-score correlation with telemetry.
 
 For each SAE latent dimension j (out of F = D * expansion_factor):

@@ -8,13 +8,7 @@ Follows the Anthropic convention:
 - Decoder: Linear(F, D) with unit-norm row constraint (each row = one feature direction).
 - Loss: MSE(x, x_hat) + l1_coeff * mean(|f|).
 
-JumpReLU replaces soft ReLU with a hard threshold gate:
-    JumpReLU(z, θ) = z  if z > θ,  else 0
-Features below the threshold are zeroed exactly; those above pass through
-at their full magnitude.  The backward pass uses a straight-through estimator
-(STE): gradients flow only through positions where the pre-activation exceeds
-the threshold.  This prevents the L1 penalty from shrinking marginal features
-to near-zero (the failure mode that collapses L0 to < 1 with plain ReLU).
+Features are activated using standard ReLU.
 
 Trained offline on harvested activations; weights are exported to numpy for
 JAX-side causal steering in causal_steering.py.
@@ -30,38 +24,6 @@ import torch.nn.functional as F
 
 
 # ---------------------------------------------------------------------------
-# JumpReLU — custom autograd function with straight-through estimator
-# ---------------------------------------------------------------------------
-
-class _JumpReLUFunction(torch.autograd.Function):
-    """JumpReLU forward + straight-through backward.
-
-    Forward : output = pre_act  if pre_act > threshold, else 0
-    Backward: gradient flows through positions where pre_act > threshold
-              (straight-through estimator — treats the step as identity
-              in the backward pass for those positions).
-    """
-
-    @staticmethod
-    def forward(ctx, pre_act: torch.Tensor, threshold: float) -> torch.Tensor:
-        mask = pre_act > threshold
-        ctx.save_for_backward(mask)
-        return pre_act * mask.to(pre_act.dtype)
-
-    @staticmethod
-    def backward(ctx, grad_output: torch.Tensor):
-        (mask,) = ctx.saved_tensors
-        # STE: pass gradient only where the gate was open
-        grad_pre_act = grad_output * mask.to(grad_output.dtype)
-        return grad_pre_act, None  # None → no gradient for threshold scalar
-
-
-def jump_relu(pre_act: torch.Tensor, threshold: float) -> torch.Tensor:
-    """Apply JumpReLU with a fixed threshold (convenience wrapper)."""
-    return _JumpReLUFunction.apply(pre_act, threshold)
-
-
-# ---------------------------------------------------------------------------
 # Sparse Autoencoder
 # ---------------------------------------------------------------------------
 
@@ -72,11 +34,6 @@ class SparseAutoencoder(nn.Module):
         input_dim:       Residual stream dimension D.
         latent_dim:      SAE latent dimension F (= D × expansion_factor).
         l1_coeff:        Sparsity penalty weight λ.
-        jump_threshold:  Hard activation threshold θ for JumpReLU.
-                         Pre-activations ≤ θ are zeroed exactly.
-                         Default 0.001 keeps the gate very permissive while
-                         preventing near-zero activations from accumulating
-                         L1 gradient and collapsing to zero.
     """
 
     def __init__(
@@ -84,15 +41,11 @@ class SparseAutoencoder(nn.Module):
         input_dim: int,
         latent_dim: int,
         l1_coeff: float = 1e-3,
-        jump_threshold: float = 0.001,
-        use_jump_relu: bool = True,
     ):
         super().__init__()
         self.input_dim = input_dim
         self.latent_dim = latent_dim
         self.l1_coeff = l1_coeff
-        self.jump_threshold = jump_threshold
-        self.use_jump_relu = use_jump_relu
 
         # Pre-encoder bias: learned center of the residual stream distribution
         self.pre_bias = nn.Parameter(torch.zeros(input_dim))
@@ -114,8 +67,7 @@ class SparseAutoencoder(nn.Module):
     def encode(self, x: torch.Tensor) -> torch.Tensor:
         """Encode a batch of residual stream vectors to sparse features.
 
-        Applies JumpReLU(θ): features below the threshold are exactly zero;
-        features above it pass through at full magnitude (no shrinkage).
+        Applies ReLU activation.
 
         Args:
             x: Input tensor [B, D].
@@ -124,8 +76,6 @@ class SparseAutoencoder(nn.Module):
             Non-negative feature activations [B, F].
         """
         pre_act = (x - self.pre_bias) @ self.W_enc + self.b_enc
-        if self.use_jump_relu:
-            return jump_relu(pre_act, self.jump_threshold)
         return F.relu(pre_act)
 
     def decode(self, f: torch.Tensor) -> torch.Tensor:
@@ -184,8 +134,6 @@ class SparseAutoencoder(nn.Module):
             input_dim=cfg['input_dim'],
             latent_dim=cfg['latent_dim'],
             l1_coeff=cfg['l1_coeff'],
-            jump_threshold=cfg.get('jump_threshold', 0.001),  # backward-compat
-            use_jump_relu=cfg.get('use_jump_relu', True),
         )
         model.load_state_dict(ckpt['model_state_dict'])
         return model
