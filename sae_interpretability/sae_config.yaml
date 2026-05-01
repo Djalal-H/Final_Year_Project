@@ -31,7 +31,7 @@ tune:
 
   # Training duration
   epochs:
-    - 100
+    - 50
 
   # Learning rate
   learning_rate:
