@@ -1,10 +1,19 @@
-"""Feature annotation via z-score correlation with telemetry.
+"""Feature annotation via z-score and Spearman correlation with telemetry.
 
 For each SAE latent dimension j (out of F = D * expansion_factor):
+
+**Z-score mode (use_correlation=False):**
 1. Find the top-K timesteps where feature j activates most strongly.
 2. Query the aligned telemetry for those timesteps.
 3. Compute z-scores: z = (mean_topK - mean_global) / std_global.
 4. Rank telemetry fields by |z| to identify the concept the feature encodes.
+
+**Correlation mode (use_correlation=True, default):**
+1. Compute Spearman ρ between the continuous feature activations and each
+   telemetry field across ALL timesteps.
+2. Rank by |ρ|.  A feature with ρ=0.85 with ego_speed is a much stronger
+   finding than a z-score of 1.37 — it uses the full dataset and captures
+   graded relationships.
 
 Outputs a JSON file with per-feature annotations and a summary.
 
@@ -14,6 +23,12 @@ Usage:
         --sae_checkpoint sae_model.pt \\
         --top_k 50 \\
         --output annotations.json
+
+    # Correlation mode (default):
+    python -m sae_interpretability.feature_annotator \\
+        --data harvest.h5 \\
+        --sae_checkpoint sae_model.pt \\
+        --output annotations.json --use_correlation
 """
 
 from __future__ import annotations
@@ -90,25 +105,86 @@ def _load_telemetry(hf: h5py.File) -> Dict[str, np.ndarray]:
     return tel
 
 
+# ---------------------------------------------------------------------------
+# Spearman correlation helpers
+# ---------------------------------------------------------------------------
+
+def _compute_spearman_correlations(
+    features: np.ndarray,
+    tel: Dict[str, np.ndarray],
+    min_activations: int,
+) -> Dict[int, Dict[str, float]]:
+    """Compute Spearman ρ between each feature and each telemetry field.
+
+    Only considers features with ≥ min_activations non-zero values.
+    Uses scipy.stats.spearmanr for correctness; the inner loop is over
+    telemetry fields (≈21) so the bottleneck is the N=790K sort per call,
+    which is fast enough for a one-time analysis.
+
+    Returns:
+        Dict mapping feature_idx → {tel_field: ρ_value}.
+    """
+    from scipy.stats import spearmanr
+
+    F_dim = features.shape[1]
+    tel_keys = list(tel.keys())
+    correlations: Dict[int, Dict[str, float]] = {}
+
+    print(f"[Annotator] Computing Spearman ρ for {F_dim} features × "
+          f"{len(tel_keys)} telemetry fields ...")
+
+    for j in range(F_dim):
+        feat_j = features[:, j]
+        n_nonzero = int((feat_j > 0).sum())
+
+        if n_nonzero < min_activations:
+            continue
+
+        rho_dict: Dict[str, float] = {}
+        for k in tel_keys:
+            rho, _ = spearmanr(feat_j, tel[k])
+            rho_dict[k] = round(float(rho) if np.isfinite(rho) else 0.0, 4)
+
+        correlations[j] = rho_dict
+
+        if (j + 1) % 500 == 0:
+            print(f"  ... {j + 1}/{F_dim} features done")
+
+    print(f"[Annotator] Spearman done — {len(correlations)} active features.")
+    return correlations
+
+
+# ---------------------------------------------------------------------------
+# Main annotation entry point
+# ---------------------------------------------------------------------------
+
 def annotate(
     data_path: str,
     sae_checkpoint: str,
     top_k: int = 50,
     output_path: str = "annotations.json",
     min_activations: int = 10,
+    use_correlation: bool = True,
 ) -> List[Dict[str, Any]]:
-    """Annotate SAE features by correlating with telemetry z-scores.
+    """Annotate SAE features by correlating with telemetry.
 
     Args:
         data_path: Path to harvest.h5.
         sae_checkpoint: Path to trained SAE .pt checkpoint.
-        top_k: Number of top-activating timesteps per feature.
+        top_k: Number of top-activating timesteps per feature (z-score mode).
         output_path: Where to save the annotations JSON.
         min_activations: Features with fewer non-zero activations are labelled 'dead'.
+        use_correlation: If True, use Spearman ρ (continuous, all timesteps) for
+            ranking and labelling.  If False, use top-K z-scores.  Both metrics
+            are always computed and stored; this flag controls which one drives
+            the label and the "most selective" ranking.
 
     Returns:
         Sorted list of annotation dicts (active features first, then dead).
     """
+    mode_str = "Spearman ρ" if use_correlation else "top-K z-score"
+    print(f"[Annotator] Annotation mode: {mode_str}")
+
     model = SparseAutoencoder.from_checkpoint(
         sae_checkpoint, map_location='cpu')
     model.eval()
@@ -153,9 +229,17 @@ def annotate(
     print(
         f"[Annotator] Encoded → {features.shape}. Annotating {F_dim} features...")
 
-    # Global stats for each telemetry field
-    global_stats = {k: (float(v.mean()), float(v.std()) + 1e-8)
-                    for k, v in tel.items()}
+    # Global stats for z-scores (only needed in z-score mode)
+    global_stats = None
+    if not use_correlation:
+        global_stats = {k: (float(v.mean()), float(v.std()) + 1e-8)
+                        for k, v in tel.items()}
+
+    # Spearman correlations (only computed in correlation mode)
+    spearman_map = None
+    if use_correlation:
+        spearman_map = _compute_spearman_correlations(
+            features, tel, min_activations)
 
     annotations: List[Dict[str, Any]] = []
     n_active = 0
@@ -170,31 +254,56 @@ def annotate(
             continue
 
         n_active += 1
-        k_actual = min(top_k, n_nonzero)
-        top_idx = np.argpartition(feat_j, -k_actual)[-k_actual:]
-        top_idx = top_idx[np.argsort(feat_j[top_idx])[::-1]]
 
-        z_scores: Dict[str, float] = {}
-        for k, vals in tel.items():
-            topk_mean = float(vals[top_idx].mean())
-            g_mean, g_std = global_stats[k]
-            z_scores[k] = round((topk_mean - g_mean) / g_std, 4)
+        if use_correlation:
+            # --- Spearman ρ mode ---
+            rho_scores = spearman_map.get(j, {})
+            ranked = sorted(rho_scores.items(),
+                            key=lambda kv: abs(kv[1]), reverse=True)
+            top_field, top_val = ranked[0] if ranked else ('', 0.0)
+            direction = "high" if top_val > 0 else "low"
+            label = f"{direction}_{top_field} (ρ={top_val:+.3f})"
+            selectivity_score = round(abs(top_val), 4)
 
-        ranked = sorted(z_scores.items(),
-                        key=lambda kv: abs(kv[1]), reverse=True)
-        top_field, top_z = ranked[0]
-        direction = "high" if top_z > 0 else "low"
-        label = f"{direction}_{top_field} (z={top_z:+.2f})"
+            annotations.append({
+                'feature_idx': j,
+                'label': label,
+                'n_activations': n_nonzero,
+                'max_abs_rho': selectivity_score,
+                'selectivity_score': selectivity_score,
+                'mean_activation_when_active': round(float(feat_j[feat_j > 0].mean()), 5),
+                'top_correlated_fields': [{'field': f, 'rho': r} for f, r in ranked[:5]],
+                'all_rho_scores': rho_scores,
+            })
+        else:
+            # --- Z-score mode ---
+            k_actual = min(top_k, n_nonzero)
+            top_idx = np.argpartition(feat_j, -k_actual)[-k_actual:]
+            top_idx = top_idx[np.argsort(feat_j[top_idx])[::-1]]
 
-        annotations.append({
-            'feature_idx': j,
-            'label': label,
-            'n_activations': n_nonzero,
-            'max_abs_z': round(abs(top_z), 4),
-            'mean_activation_when_active': round(float(feat_j[feat_j > 0].mean()), 5),
-            'top_correlated_fields': [{'field': f, 'z': z} for f, z in ranked[:5]],
-            'all_z_scores': z_scores,
-        })
+            z_scores: Dict[str, float] = {}
+            for k, vals in tel.items():
+                topk_mean = float(vals[top_idx].mean())
+                g_mean, g_std = global_stats[k]
+                z_scores[k] = round((topk_mean - g_mean) / g_std, 4)
+
+            ranked = sorted(z_scores.items(),
+                            key=lambda kv: abs(kv[1]), reverse=True)
+            top_field, top_val = ranked[0]
+            direction = "high" if top_val > 0 else "low"
+            label = f"{direction}_{top_field} (z={top_val:+.2f})"
+            selectivity_score = round(abs(top_val), 4)
+
+            annotations.append({
+                'feature_idx': j,
+                'label': label,
+                'n_activations': n_nonzero,
+                'max_abs_z': selectivity_score,
+                'selectivity_score': selectivity_score,
+                'mean_activation_when_active': round(float(feat_j[feat_j > 0].mean()), 5),
+                'top_correlated_fields': [{'field': f, 'z': z} for f, z in ranked[:5]],
+                'all_z_scores': z_scores,
+            })
 
     print(
         f"[Annotator] {n_active}/{F_dim} features active (≥{min_activations} activations)")
@@ -207,18 +316,23 @@ def annotate(
     dead = [a for a in annotations if a['label'] == 'dead']
     sorted_annotations = active + dead
 
-    # Selective features: sorted by strongest z-score (the monosemantic gems)
+    # Selective features: sorted by the mode's primary score
     selective = sorted(
         [a for a in annotations if a['label'] != 'dead'],
-        key=lambda a: a['max_abs_z'],
+        key=lambda a: a['selectivity_score'],
         reverse=True,
     )
+
+    metric_key = 'max_abs_rho' if use_correlation else 'max_abs_z'
+    metric_label = '|ρ|' if use_correlation else '|z|'
+    val_sym = 'ρ' if use_correlation else 'z'
 
     summary = {
         'total_features': F_dim,
         'active_features': n_active,
         'dead_features': F_dim - n_active,
         'dead_pct': round(100.0 * (F_dim - n_active) / F_dim, 2),
+        'annotation_mode': 'spearman' if use_correlation else 'zscore',
         'top_10_most_active': [
             {'idx': a['feature_idx'], 'label': a['label'],
                 'n_activations': a['n_activations']}
@@ -227,7 +341,7 @@ def annotate(
         'top_10_most_selective': [
             {'idx': a['feature_idx'], 'label': a['label'],
                 'n_activations': a['n_activations'],
-                'max_abs_z': a['max_abs_z']}
+                metric_key: a.get(metric_key, 0)}
             for a in selective[:10]
         ],
     }
@@ -239,33 +353,59 @@ def annotate(
             {'summary': summary, 'annotations': sorted_annotations}, f, indent=2)
 
     print(f"[Annotator] Saved → {output_path}")
-    _print_feature_table("Top 10 Most Active Features (by activation count)", active[:10])
-    _print_feature_table("Top 10 Most Selective Features (by |z-score|)", selective[:10])
+    _print_feature_table(
+        "Top 10 Most Active Features (by activation count)",
+        active[:10], metric_label, val_sym)
+    _print_feature_table(
+        f"Top 10 Most Selective Features (by {metric_label})",
+        selective[:10], metric_label, val_sym)
     return sorted_annotations
 
 
-def _print_feature_table(title: str, features: List[Dict[str, Any]]) -> None:
+def _print_feature_table(
+    title: str,
+    features: List[Dict[str, Any]],
+    metric_label: str = '|z|',
+    val_sym: str = 'z',
+) -> None:
+    corr_key = 'top_correlated_fields'
+
     print(f"\n--- {title} ---")
     for ann in features:
+        score = ann.get('selectivity_score', 0)
         print(
             f"  [{ann['feature_idx']:4d}] n={ann['n_activations']:5d}  "
-            f"|z|={ann.get('max_abs_z', 0):.2f}  {ann['label']}")
-        for entry in ann.get('top_correlated_fields', [])[:3]:
-            print(f"           {entry['field']}: z={entry['z']:+.2f}")
+            f"{metric_label}={score:.3f}  {ann['label']}")
+        for entry in ann.get(corr_key, [])[:3]:
+            val = entry.get(val_sym, entry.get('z', entry.get('rho', 0)))
+            print(f"           {entry['field']}: {val_sym}={val:+.3f}")
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Annotate SAE features via telemetry z-scores.")
+        description="Annotate SAE features via telemetry z-scores / Spearman ρ.")
     parser.add_argument("--data", required=True)
     parser.add_argument("--sae_checkpoint", required=True)
     parser.add_argument("--top_k", type=int, default=50)
     parser.add_argument("--output", default="annotations.json")
     parser.add_argument("--min_activations", type=int, default=10)
+    parser.add_argument(
+        "--use_correlation",
+        action="store_true",
+        default=True,
+        help="Use Spearman ρ (all timesteps) instead of top-K z-scores "
+             "for labelling and ranking (default: True)")
+    parser.add_argument(
+        "--no_correlation",
+        action="store_true",
+        default=False,
+        help="Disable Spearman mode and use top-K z-scores instead")
     args = parser.parse_args()
 
+    use_corr = args.use_correlation and not args.no_correlation
+
     annotate(args.data, args.sae_checkpoint, args.top_k,
-             args.output, args.min_activations)
+             args.output, args.min_activations, use_correlation=use_corr)
 
 
 if __name__ == "__main__":
