@@ -793,7 +793,7 @@ def main():
         help="Use jax.lax.scan episode loop (much faster, identical output)")
     args = parser.parse_args()
 
-    cfg = SAEConfig(sae_expansion_factor=args.expansion_factor)
+    cfg = SAEConfig()
     harvester = ActivationHarvester(
         args.run_dir, args.dataset, cfg, args.checkpoint)
     harvester.setup()
