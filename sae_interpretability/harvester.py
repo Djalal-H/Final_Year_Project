@@ -34,10 +34,27 @@ if project_root not in sys.path:
 
 
 # Scalar telemetry fields written as float32 [N]
-_SCALAR_KEYS = ['ego_speed', 'ego_x', 'ego_y', 'min_ttc', 'min_agent_dist']
+# NOTE: ego_x / ego_y intentionally excluded — raw map coordinates are not
+# driving concepts and absorb SAE features with spurious position variance.
+_SCALAR_KEYS = [
+    'ego_speed',
+    'ego_lat_accel',         # lateral acceleration (m/s²) — cornering intensity
+    'ego_yaw_rate',          # heading change rate  (rad/step) — turning signal
+    'min_ttc',
+    'min_agent_dist',
+    'n_valid_agents',        # count of valid nearby agents (scene density)
+    'lead_vehicle_dist',     # distance to lead vehicle (inf if none ahead)
+    'lead_vehicle_closing_speed',  # closing speed to lead vehicle
+]
 
 # Boolean telemetry fields written as bool [N]
-_BOOL_KEYS = ['is_ttc_critical', 'is_lead_vehicle_hard_braking']
+_BOOL_KEYS = [
+    'is_ttc_critical',
+    'is_lead_vehicle_hard_braking',
+    'is_following_lead',     # lead vehicle within 30 m and ahead
+    'has_agent_left',        # any valid agent to the left
+    'has_agent_right',       # any valid agent to the right
+]
 
 # Per-agent fields written as float32 [N, n_agents]
 _AGENT_FLOAT_KEYS = ['agent_dists', 'agent_ttcs', 'agent_speeds',
@@ -122,14 +139,27 @@ class ActivationHarvester(OfflineExtractor):
 
         sdc_idx = int(semantic.get('sdc_index', 0))
 
-        # Ego state
-        row['ego_speed'] = float(semantic.get('ego_speed', 0.0))
-        pos_x = np.asarray(semantic.get('positions_x', [0.0]))
-        pos_y = np.asarray(semantic.get('positions_y', [0.0]))
-        row['ego_x'] = float(pos_x[sdc_idx]) if sdc_idx < len(pos_x) else 0.0
-        row['ego_y'] = float(pos_y[sdc_idx]) if sdc_idx < len(pos_y) else 0.0
+        # --- Ego state ---------------------------------------------------
+        ego_speed = float(semantic.get('ego_speed', 0.0))
+        row['ego_speed'] = ego_speed
 
-        # Per-agent arrays
+        # Lateral acceleration & yaw rate (derived from prev step)
+        if prev_semantic is not None:
+            prev_speed = float(prev_semantic.get('ego_speed', 0.0))
+            # Ego yaw at current and previous timestep
+            ego_yaw_curr = float(semantic.get('ego_yaw', 0.0)) if 'ego_yaw' in semantic else 0.0
+            ego_yaw_prev = float(prev_semantic.get('ego_yaw', 0.0)) if 'ego_yaw' in prev_semantic else 0.0
+            yaw_rate = ego_yaw_curr - ego_yaw_prev
+            avg_speed = 0.5 * (ego_speed + prev_speed)
+            lat_accel = avg_speed * abs(yaw_rate) / self.sae_cfg.harvest_dt if self.sae_cfg.harvest_dt > 0 else 0.0
+        else:
+            yaw_rate = 0.0
+            lat_accel = 0.0
+
+        row['ego_lat_accel'] = float(lat_accel)
+        row['ego_yaw_rate'] = float(yaw_rate)
+
+        # --- Per-agent arrays --------------------------------------------
         distances = np.asarray(semantic.get('distance_to_ego', []))
         ttc = np.asarray(semantic.get('ttc', []))
         speeds = np.asarray(semantic.get('agent_speeds', []))
@@ -137,6 +167,7 @@ class ActivationHarvester(OfflineExtractor):
         closing = np.asarray(semantic.get('closing_speed', []))
         is_ahead = np.asarray(semantic.get('is_ahead', []))
         is_left = np.asarray(semantic.get('is_left', []))
+        is_right = np.asarray(semantic.get('is_right', []))
 
         row['agent_dists'] = distances
         row['agent_ttcs'] = ttc
@@ -146,7 +177,7 @@ class ActivationHarvester(OfflineExtractor):
         row['agent_is_ahead'] = is_ahead
         row['agent_is_left'] = is_left
 
-        # Scalar summaries
+        # --- Scalar summaries --------------------------------------------
         valid_ttc = ttc[valid] if (
             len(ttc) > 0 and len(valid) > 0) else np.array([])
         min_ttc = float(np.min(valid_ttc)) if len(valid_ttc) > 0 else 5.0
@@ -155,8 +186,26 @@ class ActivationHarvester(OfflineExtractor):
 
         row['min_ttc'] = min_ttc
         row['min_agent_dist'] = min_dist
+        row['n_valid_agents'] = float(valid.sum())
 
-        # Boolean event flags
+        # Lead vehicle (closest ahead + valid)
+        ahead_and_valid = is_ahead.astype(bool) & valid
+        if ahead_and_valid.any():
+            ahead_dists = np.where(ahead_and_valid, distances, np.inf)
+            lead_idx = int(np.argmin(ahead_dists))
+            row['lead_vehicle_dist'] = float(distances[lead_idx])
+            row['lead_vehicle_closing_speed'] = float(closing[lead_idx])
+            row['is_following_lead'] = bool(distances[lead_idx] < 30.0)
+        else:
+            row['lead_vehicle_dist'] = 999.0
+            row['lead_vehicle_closing_speed'] = 0.0
+            row['is_following_lead'] = False
+
+        # Spatial presence flags
+        row['has_agent_left'] = bool((is_left.astype(bool) & valid).any())
+        row['has_agent_right'] = bool((is_right.astype(bool) & valid).any()) if len(is_right) > 0 else False
+
+        # --- Boolean event flags -----------------------------------------
         row['is_ttc_critical'] = bool(
             min_ttc < self.sae_cfg.ttc_critical_threshold)
         row['is_lead_vehicle_hard_braking'] = self._compute_lead_vehicle_hard_braking(
@@ -278,20 +327,47 @@ class ActivationHarvester(OfflineExtractor):
         is_hard_braking = (speed_drop > threshold) & ahead_and_valid[
             np.arange(len(lead_idx)), lead_idx]      # [T]
 
-        # ---- Ego position (for HDF5 scalar keys) ----------------------
-        ego_pos_x = x[:, sdc_idx]
-        ego_pos_y = y[:, sdc_idx]
+        # ---- Ego derived dynamics (yaw rate, lateral accel) -------------
+        ego_yaw_rate = np.concatenate(
+            [[0.0], np.diff(ego_yaw)])                  # [T]  rad/step
+        avg_speed = 0.5 * (ego_speed + np.concatenate(
+            [[ego_speed[0]], ego_speed[:-1]]))
+        dt = self.sae_cfg.harvest_dt
+        ego_lat_accel = avg_speed * np.abs(ego_yaw_rate) / dt if dt > 0 else np.zeros_like(ego_speed)
+
+        # ---- Scene density -----------------------------------------------
+        n_valid_agents = valid_v.sum(axis=1).astype(np.float32)   # [T]
+
+        # ---- Lead vehicle features ---------------------------------------
+        lead_dist_arr  = dist_lead.min(axis=1)          # [T]
+        lead_closing   = closing[np.arange(len(lead_idx)), lead_idx]  # [T]
+        # Clamp when no vehicle ahead (dist_lead was inf)
+        lead_dist_arr  = np.where(np.isinf(lead_dist_arr), 999.0, lead_dist_arr)
+        lead_closing   = np.where(np.isinf(dist_lead.min(axis=1)), 0.0, lead_closing)
+        is_following   = (lead_dist_arr < 30.0) & ahead_and_valid[
+            np.arange(len(lead_idx)), lead_idx]        # [T]
+
+        # ---- Spatial presence flags --------------------------------------
+        is_right = (y_local < -1.0).astype(np.float32)  # [T, n_v]
+        has_agent_left  = (is_left.astype(bool) & valid_v).any(axis=1)   # [T]
+        has_agent_right = (is_right.astype(bool) & valid_v).any(axis=1)  # [T]
 
         return {
             # scalars [T]
-            'ego_speed':          ego_speed.astype(np.float32),
-            'ego_x':              ego_pos_x.astype(np.float32),
-            'ego_y':              ego_pos_y.astype(np.float32),
-            'min_ttc':            min_ttc.astype(np.float32),
-            'min_agent_dist':     min_dist.astype(np.float32),
+            'ego_speed':                    ego_speed.astype(np.float32),
+            'ego_lat_accel':                ego_lat_accel.astype(np.float32),
+            'ego_yaw_rate':                 ego_yaw_rate.astype(np.float32),
+            'min_ttc':                      min_ttc.astype(np.float32),
+            'min_agent_dist':               min_dist.astype(np.float32),
+            'n_valid_agents':               n_valid_agents,
+            'lead_vehicle_dist':            lead_dist_arr.astype(np.float32),
+            'lead_vehicle_closing_speed':   lead_closing.astype(np.float32),
             # booleans [T]
-            'is_ttc_critical':             is_ttc_critical,
+            'is_ttc_critical':              is_ttc_critical,
             'is_lead_vehicle_hard_braking': is_hard_braking,
+            'is_following_lead':            is_following,
+            'has_agent_left':               has_agent_left,
+            'has_agent_right':              has_agent_right,
             # per-agent [T, n_v]
             'agent_dists':          dist.astype(np.float32),
             'agent_ttcs':           ttc.astype(np.float32),

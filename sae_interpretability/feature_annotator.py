@@ -32,12 +32,31 @@ from sae_interpretability.sae_model import SparseAutoencoder
 
 # Which HDF5 telemetry fields to include in z-score analysis.
 # Per-agent fields are collapsed to scalar summary statistics first.
-_SCALAR_TEL_KEYS = ['ego_speed', 'ego_x', 'ego_y', 'min_ttc', 'min_agent_dist']
-_BOOL_TEL_KEYS = ['is_ttc_critical', 'is_lead_vehicle_hard_braking']
+#
+# NOTE: ego_x / ego_y intentionally excluded — raw map coordinates are not
+# driving concepts and absorb SAE features with spurious position variance.
+_SCALAR_TEL_KEYS = [
+    'ego_speed',
+    'ego_lat_accel',
+    'ego_yaw_rate',
+    'min_ttc',
+    'min_agent_dist',
+    'n_valid_agents',
+    'lead_vehicle_dist',
+    'lead_vehicle_closing_speed',
+]
+_BOOL_TEL_KEYS = [
+    'is_ttc_critical',
+    'is_lead_vehicle_hard_braking',
+    'is_following_lead',
+    'has_agent_left',
+    'has_agent_right',
+]
 _AGENT_KEYS_TO_SUMMARIZE = [
     ('agent_dists', ['mean', 'min']),
     ('agent_ttcs', ['mean', 'min']),
     ('agent_speeds', ['mean', 'max']),
+    ('agent_closing_speed', ['mean', 'max']),
 ]
 
 

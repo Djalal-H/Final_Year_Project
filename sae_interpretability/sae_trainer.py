@@ -29,17 +29,26 @@ from sae_interpretability.config import SAEConfig
 from sae_interpretability.sae_model import SparseAutoencoder
 
 
-def train(data_path: str, output_path: str, cfg: SAEConfig) -> SparseAutoencoder:
+def train(
+    data_path: str,
+    output_path: str,
+    cfg: SAEConfig,
+    log_dir: str | None = None,
+) -> SparseAutoencoder:
     """Train SAE on harvested activations.
 
     Args:
         data_path: Path to harvest.h5 produced by harvester.py.
         output_path: Where to save the best checkpoint (.pt).
         cfg: SAEConfig controlling architecture and training hyperparameters.
+        log_dir: Optional directory for TensorBoardX event files.
+                 Defaults to ``<output_dir>/tb_<stem>``.
 
     Returns:
         The best SparseAutoencoder loaded from the saved checkpoint.
     """
+    from tensorboardX import SummaryWriter
+
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"[Trainer] Device: {device}")
 
@@ -53,7 +62,6 @@ def train(data_path: str, output_path: str, cfg: SAEConfig) -> SparseAutoencoder
     print(f"[Trainer] Dataset: {N:,} rows × {D} dims")
 
     # Mean-center: stored in checkpoint so annotation/steering can reproduce it
-    
     act_mean = activations.mean(axis=0, keepdims=True).astype(np.float32)
     act_std  = activations.std(axis=0, keepdims=True).astype(np.float32) + 1e-8
     activations_centered = ((activations - act_mean) / act_std).astype(np.float32)
@@ -84,10 +92,18 @@ def train(data_path: str, output_path: str, cfg: SAEConfig) -> SparseAutoencoder
     scheduler = optim.lr_scheduler.CosineAnnealingLR(
         optimizer, T_max=cfg.sae_epochs)
 
+    # TensorBoardX writer
+    if log_dir is None:
+        stem = os.path.splitext(os.path.basename(output_path))[0]
+        log_dir = os.path.join(os.path.dirname(output_path) or '.', f'tb_{stem}')
+    writer = SummaryWriter(logdir=log_dir)
+    print(f"[Trainer] TensorBoard logs → {log_dir}")
+
     # Sample for dead-feature tracking (up to 8192 rows, kept on CPU)
     sample_x = x[:min(8192, N)]
 
     best_loss = float('inf')
+    best_l0 = float('inf')
 
     for epoch in range(1, cfg.sae_epochs + 1):
         model.train()
@@ -124,22 +140,39 @@ def train(data_path: str, output_path: str, cfg: SAEConfig) -> SparseAutoencoder
                 (1 - (samp_feats > 0).any(dim=0).float().mean().item())
 
         avg_loss = total_combined / n_batches
+        avg_recon = total_recon / n_batches
+        avg_l1 = total_l1 / n_batches
+        avg_l0 = total_l0 / n_batches
+
+        # -- TensorBoard logging (every epoch) --
+        writer.add_scalar('loss/combined', avg_loss, epoch)
+        writer.add_scalar('loss/reconstruction', avg_recon, epoch)
+        writer.add_scalar('loss/l1_sparsity', avg_l1, epoch)
+        writer.add_scalar('sparsity/L0', avg_l0, epoch)
+        writer.add_scalar('sparsity/dead_pct', dead_pct, epoch)
+        writer.add_scalar('lr', optimizer.param_groups[0]['lr'], epoch)
+
         if avg_loss < best_loss:
             best_loss = avg_loss
+            best_l0 = avg_l0
             _save_checkpoint(model, cfg, output_path,
-                             act_mean, act_std, epoch, best_loss)
+                             act_mean, act_std, epoch, best_loss, best_l0)
 
-        print(
-            f"Epoch {epoch:3d}/{cfg.sae_epochs}  "
-            f"loss={avg_loss:.5f}  "
-            f"recon={total_recon/n_batches:.5f}  "
-            f"l1={total_l1/n_batches:.5f}  "
-            f"L0={total_l0/n_batches:.1f}  "
-            f"dead={dead_pct:.1f}%"
-        )
+        # -- Console logging (every 10 epochs + first & last) --
+        if epoch == 1 or epoch % 10 == 0 or epoch == cfg.sae_epochs:
+            print(
+                f"Epoch {epoch:3d}/{cfg.sae_epochs}  "
+                f"loss={avg_loss:.5f}  "
+                f"recon={avg_recon:.5f}  "
+                f"l1={avg_l1:.5f}  "
+                f"L0={avg_l0:.1f}  "
+                f"dead={dead_pct:.1f}%"
+            )
 
+    writer.close()
     print(
-        f"\n[Trainer] Best checkpoint → {output_path}  (loss={best_loss:.5f})")
+        f"\n[Trainer] Best checkpoint → {output_path}  "
+        f"(loss={best_loss:.5f}, L0={best_l0:.1f})")
     return SparseAutoencoder.from_checkpoint(output_path)
 
 
@@ -151,6 +184,7 @@ def _save_checkpoint(
     act_std: np.ndarray,
     epoch: int,
     loss: float,
+    best_l0: float = 0.0,
 ):
     torch.save(
         {
@@ -164,6 +198,7 @@ def _save_checkpoint(
             'act_std':  act_std,
             'epoch': epoch,
             'loss': loss,
+            'best_l0': best_l0,
         },
         path,
     )
