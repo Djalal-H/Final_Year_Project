@@ -190,6 +190,7 @@ def annotate(
             'feature_idx': j,
             'label': label,
             'n_activations': n_nonzero,
+            'max_abs_z': round(abs(top_z), 4),
             'mean_activation_when_active': round(float(feat_j[feat_j > 0].mean()), 5),
             'top_correlated_fields': [{'field': f, 'z': z} for f, z in ranked[:5]],
             'all_z_scores': z_scores,
@@ -206,15 +207,28 @@ def annotate(
     dead = [a for a in annotations if a['label'] == 'dead']
     sorted_annotations = active + dead
 
+    # Selective features: sorted by strongest z-score (the monosemantic gems)
+    selective = sorted(
+        [a for a in annotations if a['label'] != 'dead'],
+        key=lambda a: a['max_abs_z'],
+        reverse=True,
+    )
+
     summary = {
         'total_features': F_dim,
         'active_features': n_active,
         'dead_features': F_dim - n_active,
         'dead_pct': round(100.0 * (F_dim - n_active) / F_dim, 2),
-        'top_10_features': [
+        'top_10_most_active': [
             {'idx': a['feature_idx'], 'label': a['label'],
                 'n_activations': a['n_activations']}
             for a in active[:10]
+        ],
+        'top_10_most_selective': [
+            {'idx': a['feature_idx'], 'label': a['label'],
+                'n_activations': a['n_activations'],
+                'max_abs_z': a['max_abs_z']}
+            for a in selective[:10]
         ],
     }
 
@@ -225,15 +239,17 @@ def annotate(
             {'summary': summary, 'annotations': sorted_annotations}, f, indent=2)
 
     print(f"[Annotator] Saved → {output_path}")
-    _print_top_features(active[:10])
+    _print_feature_table("Top 10 Most Active Features (by activation count)", active[:10])
+    _print_feature_table("Top 10 Most Selective Features (by |z-score|)", selective[:10])
     return sorted_annotations
 
 
-def _print_top_features(features: List[Dict[str, Any]]) -> None:
-    print("\n--- Top 10 Most Active Features ---")
+def _print_feature_table(title: str, features: List[Dict[str, Any]]) -> None:
+    print(f"\n--- {title} ---")
     for ann in features:
         print(
-            f"  [{ann['feature_idx']:4d}] n={ann['n_activations']:5d}  {ann['label']}")
+            f"  [{ann['feature_idx']:4d}] n={ann['n_activations']:5d}  "
+            f"|z|={ann.get('max_abs_z', 0):.2f}  {ann['label']}")
         for entry in ann.get('top_correlated_fields', [])[:3]:
             print(f"           {entry['field']}: z={entry['z']:+.2f}")
 
