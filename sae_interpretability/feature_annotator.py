@@ -117,9 +117,18 @@ def _compute_spearman_correlations(
     """Compute Spearman ρ between each feature and each telemetry field.
 
     Only considers features with ≥ min_activations non-zero values.
-    Uses scipy.stats.spearmanr for correctness; the inner loop is over
-    telemetry fields (≈21) so the bottleneck is the N=790K sort per call,
-    which is fast enough for a one-time analysis.
+
+    Guard conditions applied before each spearmanr call:
+    - Skip if the telemetry field is constant (std ≈ 0). This is the cause of
+      ConstantInputWarning for boolean fields like is_ttc_critical that are
+      all-False in safe-driving datasets.
+    - Skip if the feature itself is constant (shouldn't happen given the
+      min_activations guard, but defensive).
+
+    For very sparse features (< min_activations_for_spearman activations),
+    the Spearman ρ is unreliable because almost all values are tied at 0,
+    swamping the rank calculation. Those features still get ρ=0.0 and will be
+    ranked by z-score in the caller instead.
 
     Returns:
         Dict mapping feature_idx → {tel_field: ρ_value}.
@@ -129,6 +138,14 @@ def _compute_spearman_correlations(
     F_dim = features.shape[1]
     tel_keys = list(tel.keys())
     correlations: Dict[int, Dict[str, float]] = {}
+
+    # Pre-compute std for every telemetry field once — O(N) per field.
+    tel_stds = {k: float(v.std()) for k, v in tel.items()}
+    n_skipped_constant_tel = sum(1 for s in tel_stds.values() if s < 1e-9)
+    if n_skipped_constant_tel:
+        print(f"[Annotator] Warning: {n_skipped_constant_tel} telemetry field(s) "
+              f"are constant across the dataset and will be skipped in Spearman. "
+              f"Fields: {[k for k, s in tel_stds.items() if s < 1e-9]}")
 
     print(f"[Annotator] Computing Spearman ρ for {F_dim} features × "
           f"{len(tel_keys)} telemetry fields ...")
@@ -140,8 +157,29 @@ def _compute_spearman_correlations(
         if n_nonzero < min_activations:
             continue
 
+        feat_std = float(feat_j.std())
         rho_dict: Dict[str, float] = {}
+
         for k in tel_keys:
+            # Guard 1: constant telemetry field (e.g. all-False boolean in a
+            # dataset with no critical events). spearmanr would emit
+            # ConstantInputWarning and return NaN.
+            if tel_stds[k] < 1e-9:
+                rho_dict[k] = 0.0
+                continue
+
+            # Guard 2: constant feature — defensive, already covered by the
+            # n_nonzero check above but kept for safety.
+            if feat_std < 1e-9:
+                rho_dict[k] = 0.0
+                continue
+
+            # NOTE: no guard on n_nonzero here. Sparse features work correctly
+            # with Spearman because all N-k zeros receive the same tied rank
+            # (~N/2), making their contribution to the covariance zero. The
+            # signal comes entirely from the k active timesteps. A feature that
+            # fires only 5 times but always during hard-braking events will still
+            # return ρ ≈ 1.0 with is_lead_vehicle_hard_braking.
             rho, _ = spearmanr(feat_j, tel[k])
             rho_dict[k] = round(float(rho) if np.isfinite(rho) else 0.0, 4)
 
