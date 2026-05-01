@@ -104,6 +104,7 @@ def train(
 
     best_loss = float('inf')
     best_l0 = float('inf')
+    best_dead_pct = float('inf')
 
     for epoch in range(1, cfg.sae_epochs + 1):
         model.train()
@@ -155,8 +156,9 @@ def train(
         if avg_loss < best_loss:
             best_loss = avg_loss
             best_l0 = avg_l0
+            best_dead_pct = dead_pct
             _save_checkpoint(model, cfg, output_path,
-                             act_mean, act_std, epoch, best_loss, best_l0)
+                             act_mean, act_std, epoch, best_loss, best_l0, best_dead_pct)
 
         # -- Console logging (every 10 epochs + first & last) --
         if epoch == 1 or epoch % 10 == 0 or epoch == cfg.sae_epochs:
@@ -185,6 +187,7 @@ def _save_checkpoint(
     epoch: int,
     loss: float,
     best_l0: float = 0.0,
+    best_dead_pct: float = 0.0,
 ):
     torch.save(
         {
@@ -199,6 +202,7 @@ def _save_checkpoint(
             'epoch': epoch,
             'loss': loss,
             'best_l0': best_l0,
+            'best_dead_pct': best_dead_pct,
         },
         path,
     )

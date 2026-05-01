@@ -108,9 +108,8 @@ def run_tuning(
     best_global_loss = float("inf")
     best_global_path = ""
 
-    # Write CSV header immediately so partial results are preserved on crash
     fieldnames = list(grid.keys()) + [
-        "final_loss", "best_l0", "best_epoch", "run_time_s", "checkpoint"
+        "final_loss", "best_l0", "best_dead_pct", "best_epoch", "run_time_s", "checkpoint"
     ]
     with open(csv_path, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
@@ -134,15 +133,16 @@ def run_tuning(
             model = train(data_path, ckpt_path, cfg, log_dir=tb_dir)
 
             # Read the best loss and L0 back from the saved checkpoint
-            import torch
             ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
             final_loss = float(ckpt.get("loss", float("inf")))
             best_l0 = float(ckpt.get("best_l0", -1))
+            best_dead_pct = float(ckpt.get("best_dead_pct", -1))
             best_epoch = int(ckpt.get("epoch", cfg.sae_epochs))
         except Exception as e:
             print(f"[Tuner] Run {run_idx} FAILED: {e}")
             final_loss = float("inf")
             best_l0 = -1.0
+            best_dead_pct = -1.0
             best_epoch = -1
 
         elapsed = time.time() - t0
@@ -150,6 +150,7 @@ def run_tuning(
         row = {**overrides,
                "final_loss": f"{final_loss:.6f}",
                "best_l0":    f"{best_l0:.1f}",
+               "best_dead_pct": f"{best_dead_pct:.1f}",
                "best_epoch":  best_epoch,
                "run_time_s":  f"{elapsed:.1f}",
                "checkpoint":  ckpt_path}
@@ -165,7 +166,7 @@ def run_tuning(
             best_global_path = ckpt_path
 
         print(f"\n[Tuner] Run {run_idx} done  loss={final_loss:.6f}  "
-              f"L0={best_l0:.1f}  elapsed={elapsed:.1f}s\n")
+              f"L0={best_l0:.1f}  dead={best_dead_pct:.1f}%  elapsed={elapsed:.1f}s\n")
 
     # ------------------------------------------------------------------
     # Summary
@@ -177,12 +178,10 @@ def run_tuning(
     print(f"[Tuner] Best loss    → {best_global_loss:.6f}")
     print(f"{'='*60}")
 
-    # Print a sorted leaderboard
-    results_sorted = sorted(results, key=lambda r: float(r["final_loss"]))
-    print(f"\n{'Rank':<5} {'Loss':<12} {'L0':<8} Config")
+    print(f"\n{'Rank':<5} {'Loss':<12} {'L0':<8} {'Dead%':<8} Config")
     for rank, r in enumerate(results_sorted[:10], 1):
         cfg_str = "  ".join(f"{k}={r[k]}" for k in grid.keys())
-        print(f"{rank:<5} {r['final_loss']:<12} {r['best_l0']:<8} {cfg_str}")
+        print(f"{rank:<5} {r['final_loss']:<12} {r['best_l0']:<8} {r['best_dead_pct']:<8} {cfg_str}")
 
 
 # ---------------------------------------------------------------------------
