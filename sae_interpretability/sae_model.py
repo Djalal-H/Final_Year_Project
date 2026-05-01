@@ -101,7 +101,11 @@ class SparseAutoencoder(nn.Module):
         f = self.encode(x)
         x_hat = self.decode(f)
         recon_loss = F.mse_loss(x_hat, x)
-        l1_loss = f.abs().mean()
+        # L1 norm per sample (sum over features), averaged over batch.
+        # Using per-sample sum (not mean over all B×F) so that l1_coeff controls
+        # the total activation budget per sample, not a diluted per-element average.
+        # f >= 0 after ReLU so abs() is redundant.
+        l1_loss = f.sum(dim=-1).mean()
         loss = recon_loss + self.l1_coeff * l1_loss
         return x_hat, f, loss
 
