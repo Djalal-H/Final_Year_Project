@@ -394,7 +394,7 @@ def annotate(
             {'summary': summary, 'annotations': sorted_annotations}, f, indent=2)
 
     print(f"[Annotator] Saved → {output_path}")
-    
+
     _print_feature_table(
         f"Top 10 Most Selective Features (by {metric_label})",
         selective[:10], metric_label, val_sym)
@@ -435,7 +435,7 @@ def main():
     parser.add_argument("--data", required=True)
     parser.add_argument("--sae_checkpoint", required=True)
     parser.add_argument("--top_k", type=int, default=50)
-    parser.add_argument("--output", default="annotations.json")
+    parser.add_argument("--output", default="data/sae_interpretability/annotations.json")
     parser.add_argument("--min_activations", type=int, default=10)
     parser.add_argument(
         "--use_correlation",
