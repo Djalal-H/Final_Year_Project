@@ -43,6 +43,7 @@ import numpy as np
 import torch
 
 from sae_interpretability.sae_model import SparseAutoencoder
+from sae_interpretability.feature_analysis import run_analysis
 
 
 # Which HDF5 telemetry fields to include in z-score analysis.
@@ -203,6 +204,8 @@ def annotate(
     output_path: str = "annotations.json",
     min_activations: int = 10,
     use_correlation: bool = True,
+    run_grouped_analysis: bool = True,
+    fig_dir: str = "data/sae_interpretability/figures",
 ) -> List[Dict[str, Any]]:
     """Annotate SAE features by correlating with telemetry.
 
@@ -391,12 +394,19 @@ def annotate(
             {'summary': summary, 'annotations': sorted_annotations}, f, indent=2)
 
     print(f"[Annotator] Saved → {output_path}")
-    _print_feature_table(
-        "Top 10 Most Active Features (by activation count)",
-        active[:10], metric_label, val_sym)
+    
     _print_feature_table(
         f"Top 10 Most Selective Features (by {metric_label})",
         selective[:10], metric_label, val_sym)
+
+    # --- Grouped analysis & figures ---
+    if run_grouped_analysis and use_correlation:
+        tel_keys = list(tel.keys())
+        run_analysis(sorted_annotations, tel_keys, fig_dir=fig_dir)
+    elif run_grouped_analysis and not use_correlation:
+        print("[Annotator] Grouped analysis requires correlation mode "
+              "(--use_correlation). Skipping figures.")
+
     return sorted_annotations
 
 
@@ -438,12 +448,26 @@ def main():
         action="store_true",
         default=False,
         help="Disable Spearman mode and use top-K z-scores instead")
+    parser.add_argument(
+        "--no_analysis",
+        action="store_true",
+        default=False,
+        help="Skip grouped analysis and figure generation")
+    parser.add_argument(
+        "--fig_dir",
+        default="data/sae_interpretability/figures",
+        help="Output directory for analysis figures")
     args = parser.parse_args()
 
     use_corr = args.use_correlation and not args.no_correlation
 
-    annotate(args.data, args.sae_checkpoint, args.top_k,
-             args.output, args.min_activations, use_correlation=use_corr)
+    annotate(
+        args.data, args.sae_checkpoint, args.top_k,
+        args.output, args.min_activations,
+        use_correlation=use_corr,
+        run_grouped_analysis=not args.no_analysis,
+        fig_dir=args.fig_dir,
+    )
 
 
 if __name__ == "__main__":
