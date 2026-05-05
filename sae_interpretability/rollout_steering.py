@@ -83,251 +83,338 @@ _STEP_METRICS: Dict[str, Any] = {
 }
 
 
-def _compute_step_metrics(state) -> Dict[str, float]:
-    """Compute all registered vmax metrics for a single simulator state.
+# Metric aggregation semantics — mirrors vmax collector
+_MAX_METRICS   = {"run_red_light", "at_fault_collision", "overlap", "offroad"}
+_FINAL_METRICS = {"progress_ratio_nuplan", "sdc_progression"}
+
+
+def _aggregate_buffers(
+    metric_bufs: Dict[str, np.ndarray],
+    n_steps: int,
+) -> Dict[str, float]:
+    """Aggregate fixed-size metric buffers into episode-level scalars.
+
+    Buffers are pre-allocated to max_steps and filled with -2.0 as sentinel.
+    Only the first n_steps entries are meaningful.
+
+    Args:
+        metric_bufs: Dict of (max_steps,) arrays, sentinel=-2.0.
+        n_steps: Actual episode length.
 
     Returns:
-        Dict mapping metric name → scalar float value for this timestep.
+        Episode-level scalar for each metric.
     """
-    step_vals: Dict[str, float] = {}
-    for name, metric in _STEP_METRICS.items():
-        try:
-            result = metric.compute(state)
-            # MetricResult has .value (array) and .valid (bool array)
-            val = np.array(jax.device_get(result.value))
-            valid = np.array(jax.device_get(result.valid))
-            if valid.any():
-                step_vals[name] = float(np.mean(val[valid]))
-            else:
-                step_vals[name] = float("nan")
-        except Exception as exc:
-            step_vals[name] = float("nan")
-    return step_vals
-
-
-def _aggregate_episode_metrics(
-    per_step: List[Dict[str, float]]
-) -> Dict[str, float]:
-    """Aggregate per-timestep metric dicts into episode-level scalars.
-
-    Uses the same semantics as the vmax collector:
-      - overlap / offroad / run_red_light → max  (worst case)
-      - ttc, comfort, speed_limit, lanes  → mean
-      - progress                           → final value
-    """
-    if not per_step:
-        return {}
-
-    keys = per_step[0].keys()
     agg: Dict[str, float] = {}
-
-    _max_keys  = {"run_red_light", "at_fault_collision", "overlap", "offroad"}
-    _final_keys = {"progress_ratio_nuplan", "sdc_progression"}
-
-    for k in keys:
-        vals = [s[k] for s in per_step if not np.isnan(s.get(k, float("nan")))]
-        if not vals:
-            agg[k] = float("nan")
-        elif k in _max_keys:
-            agg[k] = float(np.max(vals))
-        elif k in _final_keys:
-            agg[k] = float(vals[-1])
+    for k, buf in metric_bufs.items():
+        vals = buf[:n_steps]
+        valid = vals[vals >= -1.0]   # exclude -2.0 sentinels
+        if len(valid) == 0:
+            agg[k] = float('nan')
+        elif k in _MAX_METRICS:
+            agg[k] = float(np.max(valid))
+        elif k in _FINAL_METRICS:
+            agg[k] = float(valid[-1])
         else:
-            agg[k] = float(np.mean(vals))
-
+            agg[k] = float(np.mean(valid))
     return agg
 
 
 # ---------------------------------------------------------------------------
-# RolloutSteerer
+# RolloutSteerer — JAX-optimized paired rollouts
 # ---------------------------------------------------------------------------
 
 class RolloutSteerer(CausalSteerer):
     """Run paired baseline / steered full-episode rollouts and compare metrics.
 
-    Inherits all SAE machinery from CausalSteerer.  Adds:
-      - _policy_action()   : get action from current obs via policy head.
-      - _steered_action()  : same but with SAE feature clamped first.
-      - run_paired_rollout(): execute both arms and collect metrics.
-      - run_rollout_experiment(): outer loop over scenarios and temperatures.
+    JAX optimizations applied
+    ─────────────────────────
+    1. JIT  – The combined (encode → steer → policy → step) body function is
+              compiled once via jax.jit, eliminating Python overhead per step.
+    2. while_loop – Episodes run inside jax.lax.while_loop: the "done" flag
+              is checked on-device via jnp.any(~done), never transferred to
+              the host, so there is no device→host sync per timestep.
+    3. Fixed buffers – Metric values are stored in pre-allocated (max_steps,)
+              JAX arrays using .at[t].set(v) instead of Python list appends,
+              keeping the entire carry on the accelerator.
+    4. vmap  – All steering temperatures are vectorised with jax.vmap over
+              alpha, running every temperature in a single compiled XLA
+              program. Baseline runs once and is shared.
     """
 
+    def setup(self) -> "RolloutSteerer":
+        super().setup()
+        self._build_jit_fns()
+        return self
+
     # ------------------------------------------------------------------
-    # Policy action helpers
+    # Opt 1 – JIT-compiled per-step computation
     # ------------------------------------------------------------------
 
-    def _get_h(self, obs: jnp.ndarray) -> jnp.ndarray:
-        """Encode observation → residual stream vector h  [D]."""
-        if obs.ndim == 1:
-            obs = obs[None]
-        h, _ = self.encoder.apply({'params': self.encoder_params}, obs)
-        if h.ndim > 1:
-            h = h[0]
-        return h  # [D]
+    def _build_jit_fns(self) -> None:
+        """Build and JIT-compile the forward-pass functions once at setup.
 
-    def _policy_from_h(self, h: jnp.ndarray) -> Optional[jnp.ndarray]:
-        """Run policy FC head on h → raw action vector, or None."""
-        return self._apply_fc_head(
-            h[None], self._policy_fc_params, self._policy_dense_params
+        Captures model weights in closures so every call avoids re-tracing.
+        """
+        encoder        = self.encoder
+        enc_params     = self.encoder_params
+        sae_w          = self._sae_w
+        act_mean       = self._act_mean_jnp
+        act_std        = self._act_std_jnp
+        policy_fc      = self._policy_fc_params
+        policy_dense   = self._policy_dense_params
+
+        @jax.jit
+        def encode_obs(obs: jnp.ndarray) -> jnp.ndarray:
+            """obs [1, D] → h [D]."""
+            h, _ = encoder.apply({'params': enc_params}, obs)
+            return h[0]
+
+        @jax.jit
+        def apply_steer(h: jnp.ndarray, feature_idx: int, alpha: jnp.ndarray) -> jnp.ndarray:
+            """Causal intervention: h [D] → h_mod [D]."""
+            h_norm = (h - act_mean) / act_std
+            pre_bias = sae_w.get('pre_bias', jnp.zeros_like(h_norm))
+            f = jnp.maximum((h_norm - pre_bias) @ sae_w['W_enc'] + sae_w['b_enc'], 0.0)
+            h_rec = f @ sae_w['W_dec'] + sae_w['b_dec']
+            f_s   = f.at[feature_idx].add(alpha)
+            h_s   = f_s @ sae_w['W_dec'] + sae_w['b_dec']
+            return h + (h_s - h_rec) * act_std
+
+        @jax.jit
+        def policy_head(h: jnp.ndarray) -> jnp.ndarray:
+            """h [D] → action [1, action_dim]."""
+            x = h[None]  # [1, D]
+            for key in sorted(policy_fc.keys()):
+                layer = policy_fc[key]
+                x = jnp.maximum(x @ layer['kernel'] + layer['bias'], 0.0)
+            return x @ policy_dense['kernel'] + policy_dense['bias']
+
+        self._jit_encode  = encode_obs
+        self._jit_steer   = apply_steer
+        self._jit_policy  = policy_head
+
+    # ------------------------------------------------------------------
+    # Opt 2 & 3 – while_loop + fixed-size buffers
+    # ------------------------------------------------------------------
+
+    def _run_episode_while(
+        self,
+        init_transition,
+        step_fn,          # (env_transition, action) → env_transition
+        forward_fn,       # env_transition → (action_data [1,2], policy_out [1,D])
+        max_steps: int,
+        metric_keys: List[str],
+    ) -> Tuple[Dict[str, np.ndarray], np.ndarray, np.ndarray, int]:
+        """Run one episode with jax.lax.while_loop and fixed-size metric buffers.
+
+        All state stays on-device until after the loop exits.
+
+        Args:
+            init_transition: Initial EnvTransition (from env.reset).
+            step_fn:   Wrapped env.step (JIT-compiled).
+            forward_fn: Maps env_transition → (action_data, policy_vec).
+            max_steps: Episode length cap.
+            metric_keys: Metric names to collect from env_transition.metrics.
+
+        Returns:
+            (metric_bufs, accel_buf, steer_buf, n_steps)
+        """
+        # Pre-allocate fixed-size buffers (Opt 3)
+        accel_buf = jnp.full((max_steps,), -2.0)
+        steer_buf = jnp.full((max_steps,), -2.0)
+        metric_bufs = {k: jnp.full((max_steps,), -2.0) for k in metric_keys}
+
+        def cond_fn(carry):
+            env_trans, t, _accel, _steer, _mbufs = carry
+            # On-device done check — no host sync (Opt 2)
+            return jnp.logical_and(
+                t < max_steps,
+                jnp.logical_not(jnp.any(env_trans.done)),
+            )
+
+        def body_fn(carry):
+            env_trans, t, accel_b, steer_b, mbufs = carry
+
+            # Forward pass (JIT-compiled closure, Opt 1)
+            action_data, policy_vec = forward_fn(env_trans)
+
+            # Store actions into fixed buffers (Opt 3)
+            accel_b = accel_b.at[t].set(action_data[0, 0])
+            steer_b = steer_b.at[t].set(action_data[0, 1])
+
+            # Step the environment
+            action = waymax_datatypes.Action(
+                data=action_data,
+                valid=jnp.ones((1, 1), dtype=jnp.bool_),
+            )
+            env_trans_new = step_fn(env_trans, action)
+
+            # Read metrics from wrapper's pre-computed dict (Opt 3)
+            for k in mbufs:
+                if k in env_trans_new.metrics:
+                    mbufs[k] = mbufs[k].at[t].set(env_trans_new.metrics[k][0])
+
+            return env_trans_new, t + 1, accel_b, steer_b, mbufs
+
+        init_carry = (init_transition, jnp.int32(0), accel_buf, steer_buf, metric_bufs)
+        final_trans, n_steps, accel_buf, steer_buf, metric_bufs = jax.lax.while_loop(
+            cond_fn, body_fn, init_carry
         )
 
-    def _steer_h(self, h: jnp.ndarray, feature_idx: int, alpha: float) -> jnp.ndarray:
-        """Apply SAE causal intervention on h and return modified h."""
-        f_base = self._sae_encode(h)
-        h_reconstructed = self._sae_decode(f_base)
-
-        f_steered = f_base.at[feature_idx].add(alpha)
-        h_steered_sae = self._sae_decode(f_steered)
-
-        delta = (h_steered_sae - h_reconstructed) * self._act_std_jnp
-        return h + delta  # [D]
-
-    def _action_from_policy_output(
-        self, policy_out: jnp.ndarray, env_transition
-    ) -> waymax_datatypes.Action:
-        """Wrap a raw policy vector into a Waymax Action object.
-
-        The InvertibleBicycleModel expects actions of shape (batch, 2):
-        [acceleration, steering].
-        """
-        action_np = np.array(jax.device_get(policy_out)).ravel()[:2]
-        action_data = jnp.array(action_np[None], dtype=jnp.float32)  # [1, 2]
-        valid_mask = jnp.ones((1, 1), dtype=jnp.bool_)
-        action = waymax_datatypes.Action(data=action_data, valid=valid_mask)
-        action.validate()
-        return action
+        return (
+            {k: np.array(jax.device_get(v)) for k, v in metric_bufs.items()},
+            np.array(jax.device_get(accel_buf)),
+            np.array(jax.device_get(steer_buf)),
+            int(jax.device_get(n_steps)),
+        )
 
     # ------------------------------------------------------------------
-    # Single paired rollout
+    # Single paired rollout  (baseline once + steered vmapped over α)
     # ------------------------------------------------------------------
 
     def run_paired_rollout(
         self,
         scenario_batch,
         feature_idx: int,
-        alpha: float,
+        temperatures: List[float],
         max_steps: int = 80,
     ) -> Dict[str, Any]:
-        """Run baseline and steered rollouts from the same initial state.
+        """Run one baseline and N steered rollouts from the same initial state.
 
-        Both rollouts start from the same env.reset() call. They step
-        independently: the baseline uses the unmodified policy action and the
-        steered run uses the intervention-modified action at every timestep.
+        The baseline runs once with while_loop.  All steered temperatures run
+        via jax.vmap over alpha (Opt 4) — one compiled XLA program covers every α.
 
-        Key invariant: we DO NOT reset the environment between timesteps in
-        either rollout. The environment state diverges naturally as the two
-        agents take different actions, which is exactly what we want to measure.
+        Key invariant: NO env.reset between timesteps in either arm.  State
+        diverges naturally after the first steered action.
 
         Args:
             scenario_batch: Batched scenario from the data generator.
-            feature_idx: SAE feature index to steer.
-            alpha: Temperature (additive intervention magnitude).
-            max_steps: Maximum episode length.
+            feature_idx:    SAE feature index to steer.
+            temperatures:   All α values to test in parallel.
+            max_steps:      Maximum episode length.
 
         Returns:
-            Dict with per-step records and aggregated metrics for both arms.
+            Dict with per-α results and aggregated metrics for both arms.
         """
-        # ── Baseline rollout ──────────────────────────────────────────────
-        baseline_steps: List[Dict] = []
-        baseline_transition = self.env.reset(scenario_batch)
+        # JIT-compile env.step once
+        jit_step = jax.jit(self.env.step)
 
-        for t in range(max_steps):
-            obs = baseline_transition.observation
-            h = self._get_h(obs)
-            policy_out = self._policy_from_h(h)
+        metric_keys = list(self.env.reset(scenario_batch).metrics.keys())
 
-            step_record: Dict[str, Any] = {'t': t}
-            if policy_out is not None:
-                pa = np.array(jax.device_get(policy_out)).ravel()
-                step_record['accel'] = float(pa[0]) if len(pa) > 0 else None
-                step_record['steer'] = float(pa[1]) if len(pa) > 1 else None
-                step_record['policy'] = pa.tolist()
+        # ── Baseline rollout (once per scenario) ─────────────────────────
+        init_trans = self.env.reset(scenario_batch)
 
-            # Collect metrics for this state
-            state_sq = jax.tree_util.tree_map(
-                lambda x: x.squeeze(0) if hasattr(x, 'ndim') and x.ndim > 0 else x,
-                baseline_transition.state,
+        def baseline_forward(env_trans):
+            h = self._jit_encode(env_trans.observation)
+            policy_out = self._jit_policy(h)
+            return policy_out[:, :2], policy_out
+
+        b_mbufs, b_accel, b_steer, b_steps = self._run_episode_while(
+            init_trans, jit_step, baseline_forward, max_steps, metric_keys
+        )
+        baseline_metrics = _aggregate_buffers(b_mbufs, b_steps)
+
+        # ── Steered rollouts — Opt 4: vmap over temperatures ─────────────
+        # Build a function that takes a scalar alpha and runs one steered
+        # episode using scan (fixed max_steps required by vmap).
+        feature_idx_j = jnp.int32(feature_idx)
+        alphas_j = jnp.array(temperatures, dtype=jnp.float32)  # [n_temps]
+
+        def steered_scan_step(carry, _):
+            """One step of a steered rollout (scan-compatible, α in closure)."""
+            env_trans, done, alpha = carry
+
+            h     = self._jit_encode(env_trans.observation)
+            h_mod = self._jit_steer(h, feature_idx_j, alpha)
+            policy_out = self._jit_policy(h_mod)
+            action_data = policy_out[:, :2]
+
+            action = waymax_datatypes.Action(
+                data=action_data,
+                valid=jnp.ones((1, 1), dtype=jnp.bool_),
             )
-            step_record['metrics'] = _compute_step_metrics(state_sq)
-            baseline_steps.append(step_record)
+            env_trans_new = jit_step(env_trans, action)
+            new_done = jnp.logical_or(done, jnp.any(env_trans_new.done))
 
-            # Check termination
-            if t > 0 and bool(jax.device_get(baseline_transition.done)):
-                break
+            # Freeze state after done (mask update so scan can run fixed iters)
+            env_trans_next = jax.lax.cond(
+                done,
+                lambda: env_trans,
+                lambda: env_trans_new,
+            )
 
-            # Step with baseline action
-            if policy_out is not None:
-                action = self._action_from_policy_output(policy_out, baseline_transition)
-                baseline_transition = self.env.step(baseline_transition, action)
-            else:
-                break
-
-        # ── Steered rollout ───────────────────────────────────────────────
-        steered_steps: List[Dict] = []
-        steered_transition = self.env.reset(scenario_batch)
-
-        for t in range(max_steps):
-            obs = steered_transition.observation
-            h = self._get_h(obs)
-            h_mod = self._steer_h(h, feature_idx, alpha)
-            policy_out = self._policy_from_h(h_mod)
-
-            step_record_s: Dict[str, Any] = {
-                't': t,
-                'feature_activation_before': float(self._sae_encode(h)[feature_idx]),
-                'feature_activation_after':  float(self._sae_encode(h)[feature_idx] + alpha),
+            step_metrics = {
+                k: jax.lax.cond(
+                    done,
+                    lambda: jnp.float32(-2.0),
+                    lambda: env_trans_new.metrics[k][0] if k in env_trans_new.metrics
+                            else jnp.float32(-2.0),
+                )
+                for k in metric_keys
             }
-            if policy_out is not None:
-                pa = np.array(jax.device_get(policy_out)).ravel()
-                step_record_s['accel'] = float(pa[0]) if len(pa) > 0 else None
-                step_record_s['steer'] = float(pa[1]) if len(pa) > 1 else None
-                step_record_s['policy'] = pa.tolist()
 
-            state_sq = jax.tree_util.tree_map(
-                lambda x: x.squeeze(0) if hasattr(x, 'ndim') and x.ndim > 0 else x,
-                steered_transition.state,
+            step_out = (
+                action_data[0, 0],   # accel scalar
+                action_data[0, 1],   # steer scalar
+                step_metrics,        # dict of scalars
+                done,                # was done BEFORE this step (mask)
             )
-            step_record_s['metrics'] = _compute_step_metrics(state_sq)
-            steered_steps.append(step_record_s)
+            return (env_trans_next, new_done, alpha), step_out
 
-            if t > 0 and bool(jax.device_get(steered_transition.done)):
-                break
+        def run_steered_for_alpha(alpha: jnp.ndarray):
+            """Full steered episode for one alpha value."""
+            init_carry = (init_trans, jnp.bool_(False), alpha)
+            _, outputs = jax.lax.scan(
+                steered_scan_step, init_carry, None, length=max_steps
+            )
+            return outputs  # (accel[T], steer[T], {metric: [T]}, done_mask[T])
 
-            if policy_out is not None:
-                action = self._action_from_policy_output(policy_out, steered_transition)
-                steered_transition = self.env.step(steered_transition, action)
-            else:
-                break
+        # vmap over the alpha axis (Opt 4) — shapes become [n_temps, max_steps, ...]
+        vmapped_steered = jax.jit(jax.vmap(run_steered_for_alpha))
+        s_accel_all, s_steer_all, s_mbufs_all, s_done_all = vmapped_steered(alphas_j)
 
-        # ── Aggregate ─────────────────────────────────────────────────────
-        baseline_metrics = _aggregate_episode_metrics(
-            [s['metrics'] for s in baseline_steps]
-        )
-        steered_metrics = _aggregate_episode_metrics(
-            [s['metrics'] for s in steered_steps]
-        )
+        # Transfer to host once
+        s_accel_all = np.array(jax.device_get(s_accel_all))   # [n_temps, max_steps]
+        s_steer_all = np.array(jax.device_get(s_steer_all))
+        s_done_all  = np.array(jax.device_get(s_done_all))    # [n_temps, max_steps] bool
+        s_mbufs_all = {k: np.array(jax.device_get(v)) for k, v in s_mbufs_all.items()}
 
-        # Compute delta for every metric
-        delta_metrics: Dict[str, float] = {}
-        for k in baseline_metrics:
-            bv = baseline_metrics[k]
-            sv = steered_metrics.get(k, float('nan'))
-            if not (np.isnan(bv) or np.isnan(sv)):
-                delta_metrics[k] = sv - bv
-            else:
-                delta_metrics[k] = float('nan')
+        # ── Build per-temperature result dicts ────────────────────────────
+        per_alpha_results: List[Dict] = []
+        for ti, alpha in enumerate(temperatures):
+            # Effective episode length = first step where done was True
+            done_steps = np.where(s_done_all[ti])[0]
+            n_steps_s  = int(done_steps[0]) if len(done_steps) else max_steps
 
-        return {
-            'alpha': alpha,
-            'feature_idx': feature_idx,
-            'n_steps_baseline': len(baseline_steps),
-            'n_steps_steered':  len(steered_steps),
-            'baseline_metrics': baseline_metrics,
-            'steered_metrics':  steered_metrics,
-            'delta_metrics':    delta_metrics,
-            'per_step_baseline': baseline_steps,
-            'per_step_steered':  steered_steps,
-        }
+            mbufs_ti = {k: s_mbufs_all[k][ti] for k in metric_keys}
+            steered_metrics = _aggregate_buffers(mbufs_ti, n_steps_s)
+
+            delta_metrics = {
+                k: steered_metrics[k] - baseline_metrics.get(k, float('nan'))
+                if not (np.isnan(steered_metrics[k]) or np.isnan(baseline_metrics.get(k, float('nan'))))
+                else float('nan')
+                for k in steered_metrics
+            }
+
+            per_alpha_results.append({
+                'alpha':            float(alpha),
+                'feature_idx':      feature_idx,
+                'n_steps_baseline': b_steps,
+                'n_steps_steered':  n_steps_s,
+                'baseline_metrics': baseline_metrics,
+                'steered_metrics':  steered_metrics,
+                'delta_metrics':    delta_metrics,
+                'per_step_baseline': {
+                    'accel': b_accel[:b_steps].tolist(),
+                    'steer': b_steer[:b_steps].tolist(),
+                },
+                'per_step_steered': {
+                    'accel': s_accel_all[ti, :n_steps_s].tolist(),
+                    'steer': s_steer_all[ti, :n_steps_s].tolist(),
+                },
+            })
+
+        return per_alpha_results
 
     # ------------------------------------------------------------------
     # Outer experiment loop
@@ -341,21 +428,17 @@ class RolloutSteerer(CausalSteerer):
         max_steps: int = 80,
         output_path: str = "data/sae_interpretability/rollout_results.json",
     ) -> Dict[str, Any]:
-        """Run paired rollouts across multiple scenarios and temperatures.
+        """Run paired rollouts across multiple scenarios.
 
-        For each (scenario, α) pair, two full episodes are executed.  Results
-        are aggregated across scenarios and saved to JSON.  Action trajectory
-        plots are saved alongside the JSON.
+        For each scenario, baseline runs once and all temperatures are evaluated
+        in parallel via vmap.  Results are aggregated and saved to JSON.
 
         Args:
             feature_idx:  SAE feature to steer.
-            temperatures: List of α values to test.
-            n_scenarios:  Number of independent scenarios to evaluate.
-            max_steps:    Maximum episode length per rollout.
-            output_path:  Output JSON file path.
-
-        Returns:
-            Full results dict.
+            temperatures: List of α values (vmapped in parallel).
+            n_scenarios:  Number of independent scenarios.
+            max_steps:    Maximum episode length.
+            output_path:  Output JSON path.
         """
         from vmax.simulator import make_data_generator, datasets
 
@@ -374,7 +457,8 @@ class RolloutSteerer(CausalSteerer):
         all_scenarios: List[Dict] = []
         print(
             f"\n[RolloutSteerer] Feature {feature_idx}  "
-            f"α={temperatures}  {n_scenarios} scenarios  max_steps={max_steps}"
+            f"α={temperatures}  {n_scenarios} scenarios  max_steps={max_steps}\n"
+            f"  Optimizations: JIT + while_loop + fixed_buffers + vmap({len(temperatures)} temps)"
         )
 
         for scen_idx, scenario_batch in enumerate(data_gen):
@@ -382,31 +466,28 @@ class RolloutSteerer(CausalSteerer):
                 break
 
             print(f"\n  ── Scenario {scen_idx + 1}/{n_scenarios} ──")
-            scenario_results: List[Dict] = []
+            # All temperatures run in one call (vmap, Opt 4)
+            per_alpha = self.run_paired_rollout(
+                scenario_batch, feature_idx, temperatures, max_steps
+            )
 
-            for alpha in temperatures:
-                print(f"    α={alpha:+.2f} …", end="", flush=True)
-                result = self.run_paired_rollout(
-                    scenario_batch, feature_idx, alpha, max_steps
-                )
-                result['scenario_id'] = scen_idx
-                scenario_results.append(result)
-
-                nb = result['n_steps_baseline']
-                ns = result['n_steps_steered']
-                dm = result['delta_metrics']
+            for res in per_alpha:
+                alpha = res['alpha']
+                nb    = res['n_steps_baseline']
+                ns    = res['n_steps_steered']
+                dm    = res['delta_metrics']
                 print(
-                    f" done  baseline={nb}t  steered={ns}t  "
+                    f"    α={alpha:+.2f}  baseline={nb}t  steered={ns}t  "
                     + "  ".join(
-                        f"Δ{k}={v:+.3f}"
-                        for k, v in dm.items()
+                        f"Δ{k}={v:+.3f}" for k, v in dm.items()
                         if not np.isnan(v)
                     )
                 )
+                res['scenario_id'] = scen_idx
 
             all_scenarios.append({
                 'scenario_id': scen_idx,
-                'temperatures': scenario_results,
+                'temperatures': per_alpha,
             })
 
         # ── Cross-scenario summary ─────────────────────────────────────────
@@ -432,6 +513,8 @@ class RolloutSteerer(CausalSteerer):
         plot_action_trajectories(all_scenarios, temperatures, feature_idx, out_dir)
 
         return out_data
+
+
 
 
 # ---------------------------------------------------------------------------
