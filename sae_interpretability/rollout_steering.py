@@ -506,7 +506,7 @@ class RolloutSteerer(CausalSteerer):
             json.dump(out_data, f, indent=2, default=_json_default)
 
         print(f"\n[RolloutSteerer] Results → {output_path}")
-        _print_summary_table(summary, temperatures)
+        _print_summary_table(summary, temperatures, all_scenarios)
 
         # ── Plots ─────────────────────────────────────────────────────────
         plot_rollout_metrics(summary, temperatures, feature_idx, out_dir)
@@ -571,9 +571,12 @@ def _summarise_rollout_results(
     return summary
 
 
-def _print_summary_table(summary: Dict, temperatures: List[float]) -> None:
-    """Print a compact ASCII table of mean Δmetric per temperature."""
-    # Collect all metric names
+def _print_summary_table(
+    summary: Dict,
+    temperatures: List[float],
+    all_scenarios: List[Dict],
+) -> None:
+    """Print a compact ASCII table of baseline absolute value and mean Δmetric per temperature."""
     metric_names: List[str] = []
     for alpha in temperatures:
         key = f"alpha_{alpha:+.2f}"
@@ -584,13 +587,31 @@ def _print_summary_table(summary: Dict, temperatures: List[float]) -> None:
     if not metric_names:
         return
 
+    # Collect baseline values (mean across scenarios for each metric)
+    baseline_vals: Dict[str, float] = {}
+    for mn in metric_names:
+        vals = []
+        for scen in all_scenarios:
+            for res in scen.get('temperatures', []):
+                bm = res.get('baseline_metrics', {})
+                if mn in bm and not np.isnan(bm[mn]):
+                    vals.append(bm[mn])
+                    break  # one baseline per scenario is enough
+        baseline_vals[mn] = float(np.mean(vals)) if vals else float('nan')
+
     col_w = 10
-    header = f"{'metric':<30}" + "".join(f"{a:>{col_w}.2f}" for a in temperatures)
+    # Header: baseline column + one column per alpha
+    header = (
+        f"{'metric':<30}"
+        f"{'baseline':>{col_w}}"
+        + "".join(f"{a:>{col_w}.2f}" for a in temperatures)
+    )
     print("\n" + header)
     print("-" * len(header))
 
     for mn in metric_names:
-        row = f"{mn:<30}"
+        bv = baseline_vals.get(mn, float('nan'))
+        row = f"{mn:<30}{bv:>{col_w}.4f}"
         for alpha in temperatures:
             key = f"alpha_{alpha:+.2f}"
             val = summary.get(key, {}).get('metrics', {}).get(mn, {}).get('mean', float('nan'))
@@ -693,10 +714,9 @@ def plot_action_trajectories(
             for dim_idx, dim_name in enumerate(['accel', 'steer']):
                 ax = axes[dim_idx, si]
 
-                b_vals = [s.get(dim_name, float('nan'))
-                          for s in temp_result['per_step_baseline']]
-                s_vals = [s.get(dim_name, float('nan'))
-                          for s in temp_result['per_step_steered']]
+                # per_step_baseline/steered are now dict-of-lists: {'accel': [...], 'steer': [...]}
+                b_vals = temp_result['per_step_baseline'].get(dim_name, [])
+                s_vals = temp_result['per_step_steered'].get(dim_name, [])
 
                 b_t = list(range(len(b_vals)))
                 s_t = list(range(len(s_vals)))
