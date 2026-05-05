@@ -201,24 +201,46 @@ class CausalSteerer(OfflineExtractor):
         f_baseline = self._sae_encode(h)
         h_reconstructed = self._sae_decode(f_baseline)  # baseline SAE output
 
-        result: Dict[str, Any] = {
-            'feature_idx': feature_idx,
-            'baseline_activation': float(f_baseline[feature_idx]),
-            'temperatures': [],
-        }
-
         h_batch = h[None]  # [1, D] for FC heads
         policy_base = self._apply_fc_head(
             h_batch, self._policy_fc_params, self._policy_dense_params)
         value_base = self._apply_fc_head(
             h_batch, self._value_fc_params, self._value_dense_params)
 
+        # ── Collect & print baseline values ──────────────────────────────
+        pb_raw: Optional[np.ndarray] = None
+        vb_scalar: Optional[float] = None
+        if policy_base is not None:
+            pb_raw = np.array(policy_base).ravel()
+            accel_b = float(pb_raw[0]) if len(pb_raw) > 0 else float('nan')
+            steer_b = float(pb_raw[1]) if len(pb_raw) > 1 else float('nan')
+            print(
+                f"    [baseline] accel={accel_b:+.4f}  steer={steer_b:+.4f}  "
+                f"(full policy={pb_raw.tolist()})"
+            )
+        if value_base is not None:
+            vb_scalar = float(jnp.mean(value_base))
+            print(f"    [baseline] value_estimate={vb_scalar:+.4f}")
+
+        result: Dict[str, Any] = {
+            'feature_idx': feature_idx,
+            'baseline_activation': float(f_baseline[feature_idx]),
+            'baseline_policy': pb_raw.tolist() if pb_raw is not None else None,
+            'baseline_value':  vb_scalar,
+            'temperatures': [],
+        }
+
         for alpha in temperatures:
             f_steered = f_baseline.at[feature_idx].add(alpha)
             h_steered = self._sae_decode(f_steered)
 
             # Delta is in normalized space; scale back to raw residual stream space
-            h_final = (h + (h_steered - h_reconstructed) * self._act_std_jnp)[None]  # [1, D]
+            delta = (h_steered - h_reconstructed) * self._act_std_jnp
+            assert float(jnp.linalg.norm(delta)) > 0, (
+                f"Steering had no effect on h for alpha={alpha}: delta norm is zero. "
+                f"Feature {feature_idx} decoder direction may be null."
+            )
+            h_final = (h + delta)[None]  # [1, D]
 
             entry: Dict[str, Any] = {
                 'alpha': alpha,
@@ -234,25 +256,36 @@ class CausalSteerer(OfflineExtractor):
             )
 
             # ── Policy decomposition ──────────────────────────────────────
-            # The policy head outputs a vector whose dimensions correspond to
-            # action dimensions (index 0 = acceleration, index 1 = steering).
-            # We store the full vectors for auditing and extract per-dimension
-            # deltas for direct interpretability.
             if policy_base is not None and policy_steered is not None:
                 pb = np.array(policy_base).ravel()
                 ps = np.array(policy_steered).ravel()
                 delta_policy = ps - pb
                 entry['policy_base']    = pb.tolist()
                 entry['policy_steered'] = ps.tolist()
-                # Named dimensions (extend if the action space grows)
                 entry['delta_accel'] = float(delta_policy[0]) if len(delta_policy) > 0 else None
                 entry['delta_steer'] = float(delta_policy[1]) if len(delta_policy) > 1 else None
                 entry['delta_policy_per_dim'] = delta_policy.tolist()
 
+                accel_s = float(ps[0]) if len(ps) > 0 else float('nan')
+                steer_s = float(ps[1]) if len(ps) > 1 else float('nan')
+                print(
+                    f"      α={alpha:+.2f}  accel: {accel_b:+.4f}→{accel_s:+.4f} "
+                    f"(Δ{delta_policy[0]:+.4f})  "
+                    f"steer: {steer_b:+.4f}→{steer_s:+.4f} "
+                    f"(Δ{delta_policy[1]:+.4f})"
+                )
+
             # ── Value shift ───────────────────────────────────────────────
             if value_base is not None and value_steered is not None:
-                entry['delta_value'] = float(
-                    jnp.mean(value_steered - value_base))
+                vs_scalar = float(jnp.mean(value_steered))
+                dv = vs_scalar - (vb_scalar or 0.0)
+                entry['value_base']    = vb_scalar
+                entry['value_steered'] = vs_scalar
+                entry['delta_value']   = dv
+                print(
+                    f"             value: {vb_scalar:+.4f}→{vs_scalar:+.4f} "
+                    f"(Δ{dv:+.4f})"
+                )
 
             result['temperatures'].append(entry)
 
