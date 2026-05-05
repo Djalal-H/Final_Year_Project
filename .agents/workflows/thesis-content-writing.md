@@ -1,5 +1,5 @@
 ---
-description: I need you to provide a high-level, rigorous technical synthesis of this research.
+description: I need you to provide a rigorous technical synthesis of this research.
 ---
 
 I am transitioning from the development phase to the thesis-writing phase of my PhD project. I need you to provide a high-level, rigorous technical synthesis of this codebase. This synthesis will serve as the primary context for a separate LLM that will assist in drafting my dissertation in LaTeX.

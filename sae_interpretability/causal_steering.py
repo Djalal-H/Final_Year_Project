@@ -1,5 +1,3 @@
-# Copyright 2025 Valeo.
-
 """Causal steering: modify a single SAE feature and measure behavioral change.
 
 Intervention protocol for feature j at temperature α:
@@ -13,7 +11,19 @@ Intervention protocol for feature j at temperature α:
     ↓  apply delta in residual stream space
     h_final = h + (h_steered - h_reconstructed)
     ↓  policy / value FC heads
-    Δvalue, Δlogit_norm  ← behavioral effect
+    Δvalue, Δaccel, Δsteer  ← behavioral effect
+
+Outputs per temperature step:
+  • delta_accel  – shift in acceleration action dimension
+  • delta_steer  – shift in steering action dimension
+  • policy_base / policy_steered – full raw action vectors for audit
+  • delta_value  – mean shift in value estimate
+
+Aggregation over scenarios:
+  • mean / std / median / p5 / p95 of Δvalue distribution
+  • sign_flip_frac: fraction of scenarios where Δvalue changes sign
+    (a feature with mean≈0 but high sign_flip_frac is still important)
+  • Histogram PNGs saved alongside the JSON output.
 
 A large Δvalue that scales monotonically with α confirms that feature j
 causally drives the agent's value estimate.
@@ -24,7 +34,7 @@ Usage:
         --dataset ../../training.tfrecord \\
         --sae_checkpoint sae_model.pt \\
         --feature_idx 42 \\
-        --temperatures 0.5 1.0 2.0 5.0
+        --temperatures -5.0 -2.0 -1.0 1.0 2.0 5.0
 """
 
 from __future__ import annotations
@@ -36,10 +46,14 @@ import argparse
 import json
 import os
 import sys
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import jax
 import jax.numpy as jnp
+import matplotlib
+matplotlib.use("Agg")  # headless
+import matplotlib.pyplot as plt
 import numpy as np
 import torch
 
@@ -122,7 +136,8 @@ class CausalSteerer(OfflineExtractor):
 
     def _sae_encode(self, h: jnp.ndarray) -> jnp.ndarray:
         w = self._sae_w
-        return jnp.maximum(((h - self._act_mean_jnp) / self._act_std_jnp) @ w['W_enc'] + w['b_enc'], 0.0)
+        h_norm = (h - self._act_mean_jnp) / self._act_std_jnp
+        return jnp.maximum((h_norm - w['pre_bias']) @ w['W_enc'] + w['b_enc'], 0.0)
 
     def _sae_decode(self, f: jnp.ndarray) -> jnp.ndarray:
         w = self._sae_w
@@ -202,8 +217,8 @@ class CausalSteerer(OfflineExtractor):
             f_steered = f_baseline.at[feature_idx].add(alpha)
             h_steered = self._sae_decode(f_steered)
 
-            # Apply only the delta so we stay in the residual stream manifold
-            h_final = (h + (h_steered - h_reconstructed))[None]  # [1, D]
+            # Delta is in normalized space; scale back to raw residual stream space
+            h_final = (h + (h_steered - h_reconstructed) * self._act_std_jnp)[None]  # [1, D]
 
             entry: Dict[str, Any] = {
                 'alpha': alpha,
@@ -218,10 +233,23 @@ class CausalSteerer(OfflineExtractor):
                 h_final, self._value_fc_params, self._value_dense_params
             )
 
+            # ── Policy decomposition ──────────────────────────────────────
+            # The policy head outputs a vector whose dimensions correspond to
+            # action dimensions (index 0 = acceleration, index 1 = steering).
+            # We store the full vectors for auditing and extract per-dimension
+            # deltas for direct interpretability.
             if policy_base is not None and policy_steered is not None:
-                entry['delta_policy_norm'] = float(
-                    jnp.linalg.norm(policy_steered - policy_base)
-                )
+                pb = np.array(policy_base).ravel()
+                ps = np.array(policy_steered).ravel()
+                delta_policy = ps - pb
+                entry['policy_base']    = pb.tolist()
+                entry['policy_steered'] = ps.tolist()
+                # Named dimensions (extend if the action space grows)
+                entry['delta_accel'] = float(delta_policy[0]) if len(delta_policy) > 0 else None
+                entry['delta_steer'] = float(delta_policy[1]) if len(delta_policy) > 1 else None
+                entry['delta_policy_per_dim'] = delta_policy.tolist()
+
+            # ── Value shift ───────────────────────────────────────────────
             if value_base is not None and value_steered is not None:
                 entry['delta_value'] = float(
                     jnp.mean(value_steered - value_base))
@@ -282,37 +310,143 @@ class CausalSteerer(OfflineExtractor):
             baseline = result['baseline_activation']
             print(f"  Scenario {i+1:3d}: baseline_activation={baseline:.4f}")
 
-        # Aggregate delta_value per temperature
+        # ── Aggregate Δvalue distribution per temperature ─────────────────
         n_temps = len(temperatures)
-        delta_matrix = np.zeros((len(all_results), n_temps))
+        n_scenarios_ran = len(all_results)
+        delta_matrix = np.zeros((n_scenarios_ran, n_temps))
         for si, res in enumerate(all_results):
             for ti, entry in enumerate(res['temperatures']):
                 delta_matrix[si, ti] = entry.get('delta_value', 0.0)
 
+        # ── Aggregate per-action-dimension policy shifts ───────────────────
+        accel_matrix = np.zeros((n_scenarios_ran, n_temps))
+        steer_matrix = np.zeros((n_scenarios_ran, n_temps))
+        for si, res in enumerate(all_results):
+            for ti, entry in enumerate(res['temperatures']):
+                accel_matrix[si, ti] = entry.get('delta_accel') or 0.0
+                steer_matrix[si, ti] = entry.get('delta_steer') or 0.0
+
+        def _dist_stats(mat: np.ndarray) -> Dict:
+            """Return rich distribution stats for a (scenarios × temps) matrix."""
+            sign_pos = (mat > 0).sum(axis=0)
+            sign_neg = (mat < 0).sum(axis=0)
+            sign_flip = np.minimum(sign_pos, sign_neg) / max(n_scenarios_ran, 1)
+            return {
+                'mean':           mat.mean(axis=0).tolist(),
+                'std':            mat.std(axis=0).tolist(),
+                'median':         np.median(mat, axis=0).tolist(),
+                'p5':             np.percentile(mat, 5,  axis=0).tolist(),
+                'p95':            np.percentile(mat, 95, axis=0).tolist(),
+                'sign_flip_frac': sign_flip.tolist(),
+            }
+
         summary = {
-            'feature_idx': feature_idx,
+            'feature_idx':  feature_idx,
             'temperatures': temperatures,
-            'mean_delta_value': delta_matrix.mean(axis=0).tolist(),
-            'std_delta_value': delta_matrix.std(axis=0).tolist(),
+            'n_scenarios':  n_scenarios_ran,
             'mean_baseline_activation': float(
                 np.mean([r['baseline_activation'] for r in all_results])
             ),
+            'delta_value':  _dist_stats(delta_matrix),
+            'delta_accel':  _dist_stats(accel_matrix),
+            'delta_steer':  _dist_stats(steer_matrix),
         }
 
-        os.makedirs(os.path.dirname(os.path.abspath(output_path))
-                    or '.', exist_ok=True)
+        out_dir = Path(output_path).parent
+        out_dir.mkdir(parents=True, exist_ok=True)
         with open(output_path, 'w') as f:
             json.dump(
                 {'summary': summary, 'per_scenario': all_results}, f, indent=2)
 
         print(f"\n[Steerer] Results → {output_path}")
-        print("  Mean Δvalue per α:")
-        for alpha, dv in zip(temperatures, summary['mean_delta_value']):
-            bar = '▮' * int(abs(dv) * 20)
+        print("  Mean Δvalue / Δaccel / Δsteer per α:")
+        for ti, alpha in enumerate(temperatures):
+            dv = summary['delta_value']['mean'][ti]
+            da = summary['delta_accel']['mean'][ti]
+            ds = summary['delta_steer']['mean'][ti]
+            sf = summary['delta_value']['sign_flip_frac'][ti]
             sign = '+' if dv >= 0 else ''
-            print(f"    α={alpha:5.1f}: {sign}{dv:.4f}  {bar}")
+            bar  = '▮' * int(abs(dv) * 20)
+            print(
+                f"    α={alpha:+5.1f}:  Δval={sign}{dv:.4f}  "
+                f"Δaccel={da:+.4f}  Δsteer={ds:+.4f}  "
+                f"sign_flip={sf:.0%}  {bar}"
+            )
+
+        # ── Histogram plots ────────────────────────────────────────────────
+        plot_histograms(
+            delta_matrix, accel_matrix, steer_matrix,
+            temperatures, feature_idx, out_dir,
+        )
 
         return {'summary': summary, 'per_scenario': all_results}
+
+
+# ---------------------------------------------------------------------------
+# Histogram visualisation
+# ---------------------------------------------------------------------------
+
+def plot_histograms(
+    delta_value:  np.ndarray,
+    delta_accel:  np.ndarray,
+    delta_steer:  np.ndarray,
+    temperatures: List[float],
+    feature_idx:  int,
+    out_dir:      Path,
+) -> None:
+    """Save histogram PNG files showing the distribution of Δvalue, Δaccel, Δsteer
+    across scenarios for every temperature.
+
+    One PNG per metric is emitted so figures stay readable regardless of the
+    number of temperature levels.
+
+    Args:
+        delta_value:  (n_scenarios, n_temps) Δvalue matrix.
+        delta_accel:  (n_scenarios, n_temps) Δaccel matrix.
+        delta_steer:  (n_scenarios, n_temps) Δsteer matrix.
+        temperatures: List of α values (used for labels).
+        feature_idx:  SAE feature index being steered (used in titles).
+        out_dir:      Directory where PNG files are written.
+    """
+    n_temps = len(temperatures)
+    metrics = [
+        ('delta_value', delta_value,  'Δvalue',  '#4C72B0'),
+        ('delta_accel', delta_accel,  'Δaccel',  '#DD8452'),
+        ('delta_steer', delta_steer,  'Δsteer',  '#55A868'),
+    ]
+
+    for metric_name, mat, label, color in metrics:
+        fig, axes = plt.subplots(
+            1, n_temps,
+            figsize=(4 * n_temps, 4),
+            sharey=False,
+        )
+        if n_temps == 1:
+            axes = [axes]
+
+        for ti, (ax, alpha) in enumerate(zip(axes, temperatures)):
+            vals = mat[:, ti]
+            ax.hist(vals, bins=min(20, len(vals)), color=color,
+                    edgecolor='white', alpha=0.85)
+            ax.axvline(0, color='crimson', linewidth=1.2, linestyle='--')
+            mean_v = float(vals.mean())
+            ax.axvline(mean_v, color='gold', linewidth=1.2,
+                       linestyle='-', label=f'mean={mean_v:+.3f}')
+            ax.set_title(f'α={alpha:+.1f}', fontsize=10)
+            ax.set_xlabel(label, fontsize=9)
+            ax.set_ylabel('# scenarios', fontsize=9)
+            ax.legend(fontsize=7)
+            ax.tick_params(labelsize=8)
+
+        fig.suptitle(
+            f'Feature {feature_idx} — {label} distribution across scenarios',
+            fontsize=12, fontweight='bold',
+        )
+        plt.tight_layout()
+        out_path = out_dir / f'f{feature_idx}_{metric_name}_hist.png'
+        fig.savefig(out_path, dpi=130, bbox_inches='tight')
+        plt.close(fig)
+        print(f"[Steerer] Histogram → {out_path}")
 
 
 def main():
@@ -323,9 +457,9 @@ def main():
     parser.add_argument("--sae_checkpoint", required=True)
     parser.add_argument("--feature_idx", type=int, required=True)
     parser.add_argument("--temperatures", type=float,
-                        nargs="+", default=[0.5, 1.0, 2.0, 5.0])
+                        nargs="+", default=[-5.0, -2.0, -1.0, 1.0, 2.0, 5.0])
     parser.add_argument("--n_scenarios", type=int, default=10)
-    parser.add_argument("--output", default="steering_results.json")
+    parser.add_argument("--output", default="data/sae_interpretability/steering_results.json")
     parser.add_argument("--checkpoint", default="model_final.pkl")
     args = parser.parse_args()
 
