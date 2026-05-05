@@ -19,6 +19,7 @@ All figures are saved to ``data/sae_interpretability/figures/``.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 from collections import defaultdict
@@ -406,14 +407,102 @@ def selectivity_histogram(
 
 
 # ===================================================================
-# Orchestrator
+# 6. Export Feature Index Map
 # ===================================================================
+
+def export_feature_index_map(
+    annotations: List[Dict[str, Any]],
+    fig_dir: str = _FIG_DIR,
+    output_filename: str = "feature_index_map.json",
+) -> Dict[str, int]:
+    """Build and save a ``{concept_name: best_feature_idx}`` mapping.
+
+    Rules applied
+    -------------
+    * **Dead features are excluded** — any annotation whose label is ``'dead'``
+      is skipped entirely.
+    * **Zero-correlation features are excluded** — if every ρ value in
+      ``all_rho_scores`` is exactly 0 (or the dict is absent), the feature is
+      ignored.
+    * **Per-concept deduplication** — multiple SAE features can receive the
+      same concept label (e.g. ``'high_ego_speed'``).  For each concept the
+      feature with the highest ``max |ρ|`` across all telemetry fields is kept.
+
+    The resulting JSON is saved next to the other analysis figures.
+
+    Args:
+        annotations: List of per-feature annotation dicts.
+        fig_dir: Directory where the JSON file is written.
+        output_filename: Filename for the JSON output.
+
+    Returns:
+        The ``{concept_name: feature_idx}`` dict that was saved.
+    """
+    _ensure_fig_dir(fig_dir)
+
+    # concept_name → (feature_idx, max_abs_rho)
+    best_per_concept: Dict[str, tuple] = {}
+
+    for ann in annotations:
+        label = ann.get("label", "")
+
+        # Skip dead features
+        if label == "dead":
+            continue
+
+        rho_scores = ann.get("all_rho_scores", {})
+
+        # Skip if no ρ scores recorded
+        if not rho_scores:
+            continue
+
+        abs_rhos = [abs(v) for v in rho_scores.values()]
+        max_abs_rho = max(abs_rhos) if abs_rhos else 0.0
+
+        # Skip zero-correlation features
+        if max_abs_rho == 0.0:
+            continue
+
+        concept = _strip_rho_suffix(label)
+        feat_idx = ann["feature_idx"]
+
+        if concept not in best_per_concept or max_abs_rho > best_per_concept[concept][1]:
+            best_per_concept[concept] = (feat_idx, max_abs_rho)
+
+    # Flatten to {concept: idx}
+    feature_map: Dict[str, int] = {
+        concept: feat_idx
+        for concept, (feat_idx, _) in sorted(best_per_concept.items())
+    }
+
+    # Save JSON
+    out_path = os.path.join(fig_dir, output_filename)
+    with open(out_path, "w") as f:
+        json.dump(feature_map, f, indent=2)
+
+    print(f"[Analysis] Feature index map ({len(feature_map)} concepts) → {out_path}")
+
+    # Print table
+    print("\n╔══════════════════════════════════════════════════════╗")
+    print("║        Feature Index Map (concept → best idx)        ║")
+    print("╠══════════════════════════════════╦══════════╦════════╣")
+    print("║ Concept                          ║ feat_idx ║ max|ρ| ║")
+    print("╠══════════════════════════════════╬══════════╬════════╣")
+    for concept, (feat_idx, max_rho) in sorted(
+        best_per_concept.items(), key=lambda x: -x[1][1]
+    ):
+        print(f"║ {concept:<32s} ║ {feat_idx:>8d} ║ {max_rho:>6.4f} ║")
+    print("╚══════════════════════════════════╩══════════╩════════╝")
+
+    return feature_map
+
+
 
 def run_analysis(
     annotations: List[Dict[str, Any]],
     tel_keys: List[str],
     fig_dir: str = _FIG_DIR,
-) -> None:
+) -> Dict[str, int]:
     """Run all grouped analyses and generate all figures.
 
     Args:
@@ -423,6 +512,10 @@ def run_analysis(
         tel_keys: Ordered list of telemetry field names (column names for
             the correlation matrices).
         fig_dir: Output directory for figures.
+
+    Returns:
+        The ``{concept_name: feature_idx}`` mapping saved to
+        ``feature_index_map.json``.
     """
     print("\n" + "=" * 64)
     print("  SAE Feature Analysis — Grouped Visualisations")
@@ -433,7 +526,10 @@ def run_analysis(
     concept_group_heatmap(annotations, tel_keys, fig_dir=fig_dir)
     feature_telemetry_clustermap(annotations, tel_keys, fig_dir=fig_dir)
     selectivity_histogram(annotations, fig_dir)
+    feature_map = export_feature_index_map(annotations, fig_dir)
 
     print("\n" + "=" * 64)
     print(f"  All figures saved to {fig_dir}/")
     print("=" * 64 + "\n")
+
+    return feature_map

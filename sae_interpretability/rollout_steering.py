@@ -36,6 +36,7 @@ import argparse
 import json
 import os
 import sys
+import textwrap
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -422,24 +423,125 @@ class RolloutSteerer(CausalSteerer):
 
     def run_rollout_experiment(
         self,
-        feature_idx: int,
+        features: Dict[str, int],
         temperatures: List[float],
         n_scenarios: int = 5,
         max_steps: int = 80,
         output_path: str = "data/sae_interpretability/rollout_results.json",
     ) -> Dict[str, Any]:
-        """Run paired rollouts across multiple scenarios.
+        """Run paired rollouts for multiple named features across multiple scenarios.
 
-        For each scenario, baseline runs once and all temperatures are evaluated
-        in parallel via vmap.  Results are aggregated and saved to JSON.
+        For each feature and scenario, baseline runs once and all temperatures
+        are evaluated in parallel via vmap.  Results are keyed by feature name
+        and saved together in a single JSON.
 
         Args:
-            feature_idx:  SAE feature to steer.
-            temperatures: List of α values (vmapped in parallel).
-            n_scenarios:  Number of independent scenarios.
+            features:     Dict mapping human-readable name → SAE feature index.
+                          Example: {"speed_limit": 42, "lane_change": 17}
+            temperatures: List of α values (vmapped in parallel per feature).
+            n_scenarios:  Number of independent scenarios per feature.
             max_steps:    Maximum episode length.
             output_path:  Output JSON path.
+
+        Returns:
+            Full results dict keyed by feature name.
         """
+        from vmax.simulator import make_data_generator, datasets
+
+        out_dir = Path(output_path).parent
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        print(
+            f"\n[RolloutSteerer] {len(features)} feature(s)  "
+            f"α={temperatures}  {n_scenarios} scenarios  max_steps={max_steps}\n"
+            f"  Optimizations: JIT + while_loop + fixed_buffers + vmap({len(temperatures)} temps)"
+        )
+
+        all_feature_results: Dict[str, Any] = {}
+
+        for feature_name, feature_idx in features.items():
+            print(f"\n{'='*60}")
+            print(f"  Feature: '{feature_name}'  (idx={feature_idx})")
+            print(f"{'='*60}")
+
+            data_gen = make_data_generator(
+                path=datasets.get_dataset(self.dataset_path),
+                max_num_objects=self.config["max_num_objects"],
+                include_sdc_paths=not self.config.get("waymo_dataset", False),
+                batch_dims=(1,),
+                seed=42,
+                repeat=1,
+            )
+
+            all_scenarios: List[Dict] = []
+
+            for scen_idx, scenario_batch in enumerate(data_gen):
+                if scen_idx >= n_scenarios:
+                    break
+
+                print(f"\n  ── Scenario {scen_idx + 1}/{n_scenarios} ──")
+                per_alpha = self.run_paired_rollout(
+                    scenario_batch, feature_idx, temperatures, max_steps
+                )
+
+                for res in per_alpha:
+                    alpha = res['alpha']
+                    nb    = res['n_steps_baseline']
+                    ns    = res['n_steps_steered']
+                    dm    = res['delta_metrics']
+                    print(
+                        f"    α={alpha:+.2f}  baseline={nb}t  steered={ns}t  "
+                        + "  ".join(
+                            f"Δ{k}={v:+.3f}" for k, v in dm.items()
+                            if not np.isnan(v)
+                        )
+                    )
+                    res['scenario_id'] = scen_idx
+
+                all_scenarios.append({
+                    'scenario_id': scen_idx,
+                    'temperatures': per_alpha,
+                })
+
+            # ── Per-feature summary ────────────────────────────────────────
+            summary = _summarise_rollout_results(all_scenarios, temperatures, feature_idx)
+
+            print(f"\n  Summary for '{feature_name}' (idx={feature_idx}):")
+            _print_summary_table(summary, temperatures, all_scenarios)
+
+            plot_rollout_metrics(
+                summary, temperatures, feature_idx, out_dir,
+                feature_name=feature_name,
+            )
+            plot_action_trajectories(
+                all_scenarios, temperatures, feature_idx, out_dir,
+                feature_name=feature_name,
+            )
+
+            all_feature_results[feature_name] = {
+                'feature_name': feature_name,
+                'feature_idx':  feature_idx,
+                'temperatures': temperatures,
+                'n_scenarios':  len(all_scenarios),
+                'max_steps':    max_steps,
+                'summary':      summary,
+                'scenarios':    all_scenarios,
+            }
+
+        # ── Save combined results ──────────────────────────────────────────
+        out_data = {
+            'features':     {name: idx for name, idx in features.items()},
+            'temperatures': temperatures,
+            'n_scenarios':  n_scenarios,
+            'max_steps':    max_steps,
+            'results':      all_feature_results,
+        }
+
+        with open(output_path, 'w') as f:
+            json.dump(out_data, f, indent=2, default=_json_default)
+
+        print(f"\n[RolloutSteerer] Combined results → {output_path}")
+        return out_data
         from vmax.simulator import make_data_generator, datasets
 
         data_gen = make_data_generator(
@@ -628,9 +730,10 @@ def plot_rollout_metrics(
     temperatures: List[float],
     feature_idx: int,
     out_dir: Path,
+    feature_name: str = "",
 ) -> None:
     """Bar chart of mean Δmetric per temperature for each vmax metric."""
-    # Collect metric names
+    label = feature_name if feature_name else str(feature_idx)
     metric_names: List[str] = []
     for alpha in temperatures:
         key = f"alpha_{alpha:+.2f}"
@@ -673,14 +776,17 @@ def plot_rollout_metrics(
         ax.tick_params(labelsize=7)
 
     fig.suptitle(
-        f'Feature {feature_idx} — Δmetric per temperature (paired rollouts)',
+        f"'{label}' (idx {feature_idx}) — Δmetric per temperature",
         fontsize=12, fontweight='bold',
     )
     plt.tight_layout()
-    out_path = out_dir / f'f{feature_idx}_rollout_metrics.png'
+    safe_name = label.replace(' ', '_')
+    out_path = out_dir / f'f{feature_idx}_{safe_name}_rollout_metrics.png'
     fig.savefig(out_path, dpi=130, bbox_inches='tight')
     plt.close(fig)
     print(f"[RolloutSteerer] Plot → {out_path}")
+
+
 
 
 def plot_action_trajectories(
@@ -688,12 +794,15 @@ def plot_action_trajectories(
     temperatures: List[float],
     feature_idx: int,
     out_dir: Path,
+    feature_name: str = "",
 ) -> None:
     """For each temperature, plot baseline vs steered accel and steer over time.
 
-    One figure per temperature.  Each figure has 2 rows (accel, steer) ×
+    One figure per temperature.  Each figure has 2 rows (accel, steer) x
     n_scenarios columns.
     """
+    label = feature_name if feature_name else str(feature_idx)
+    safe_name = label.replace(' ', '_')
     n_scen = len(all_scenarios)
     if n_scen == 0:
         return
@@ -704,7 +813,6 @@ def plot_action_trajectories(
         )
 
         for si, scen in enumerate(all_scenarios):
-            # Find result for this alpha
             temp_result = next(
                 (r for r in scen['temperatures'] if r['alpha'] == alpha), None
             )
@@ -738,12 +846,12 @@ def plot_action_trajectories(
                 ax.tick_params(labelsize=7)
 
         fig.suptitle(
-            f'Feature {feature_idx} — Action trajectories  α={alpha:+.1f}',
+            f"'{label}' (idx {feature_idx}) — Action trajectories  α={alpha:+.1f}",
             fontsize=12, fontweight='bold',
         )
         plt.tight_layout()
         alpha_str = f"{alpha:+.1f}".replace('+', 'p').replace('-', 'n').replace('.', '_')
-        out_path = out_dir / f'f{feature_idx}_a{alpha_str}_trajectories.png'
+        out_path = out_dir / f'f{feature_idx}_{safe_name}_a{alpha_str}_trajectories.png'
         fig.savefig(out_path, dpi=130, bbox_inches='tight')
         plt.close(fig)
         print(f"[RolloutSteerer] Plot → {out_path}")
@@ -753,26 +861,75 @@ def plot_action_trajectories(
 # CLI
 # ---------------------------------------------------------------------------
 
+def _parse_features(raw: List[str]) -> Dict[str, int]:
+    """Parse 'name:idx' strings into a {name: idx} dict.
+
+    Example input: ["speed_limit:42", "lane_change:17"]
+    """
+    features: Dict[str, int] = {}
+    for token in raw:
+        if ':' not in token:
+            raise argparse.ArgumentTypeError(
+                f"Feature '{token}' must be in 'name:idx' format, e.g. 'speed:42'"
+            )
+        name, idx_str = token.rsplit(':', 1)
+        features[name.strip()] = int(idx_str.strip())
+    return features
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Multi-timestep causal steering with vmax rollout metrics."
+        description="Multi-timestep causal steering with vmax rollout metrics.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=textwrap.dedent("""
+            Feature specification (choose one):
+              --features name:idx [name:idx ...]   inline pairs
+              --features_file path/to/features.json  JSON dict {"name": idx, ...}
+
+            Example:
+              python -m sae_interpretability.rollout_steering \\\\
+                --run_dir runs/PPO \\\\
+                --dataset training.tfrecord \\\\
+                --sae_checkpoint sae.pt \\\\
+                --features speed_limit:42 lane_change:17 braking:93 \\\\
+                --temperatures -5.0 -1.0 1.0 5.0
+        """),
     )
-    parser.add_argument("--run_dir",         required=True)
-    parser.add_argument("--dataset",         required=True)
-    parser.add_argument("--sae_checkpoint",  required=True)
-    parser.add_argument("--feature_idx",     type=int, required=True)
+    parser.add_argument("--run_dir",        required=True)
+    parser.add_argument("--dataset",        required=True)
+    parser.add_argument("--sae_checkpoint", required=True)
+
+    feat_group = parser.add_mutually_exclusive_group(required=True)
+    feat_group.add_argument(
+        "--features", nargs="+", metavar="NAME:IDX",
+        help="One or more features as 'name:idx' pairs, e.g. speed_limit:42",
+    )
+    feat_group.add_argument(
+        "--features_file", metavar="PATH",
+        help="JSON file mapping feature names to indices: {\"speed_limit\": 42, ...}",
+    )
+
     parser.add_argument(
         "--temperatures", type=float, nargs="+",
         default=[-5.0, -2.0, -1.0, 1.0, 2.0, 5.0],
     )
-    parser.add_argument("--n_scenarios",  type=int, default=5)
-    parser.add_argument("--max_steps",    type=int, default=80)
+    parser.add_argument("--n_scenarios", type=int, default=5)
+    parser.add_argument("--max_steps",   type=int, default=80)
     parser.add_argument(
         "--output",
         default="data/sae_interpretability/rollout_results.json",
     )
-    parser.add_argument("--checkpoint",   default="model_final.pkl")
+    parser.add_argument("--checkpoint", default="model_final.pkl")
     args = parser.parse_args()
+
+    # Resolve features dict
+    if args.features:
+        features = _parse_features(args.features)
+    else:
+        with open(args.features_file) as f:
+            features = {str(k): int(v) for k, v in json.load(f).items()}
+
+    print(f"[RolloutSteerer] Features to steer: {features}")
 
     cfg = SAEConfig()
     steerer = RolloutSteerer(
@@ -780,7 +937,7 @@ def main() -> None:
     )
     steerer.setup()
     steerer.run_rollout_experiment(
-        feature_idx=args.feature_idx,
+        features=features,
         temperatures=args.temperatures,
         n_scenarios=args.n_scenarios,
         max_steps=args.max_steps,
