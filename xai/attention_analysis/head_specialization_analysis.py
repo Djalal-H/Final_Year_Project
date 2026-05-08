@@ -1079,6 +1079,19 @@ class HeadVisualization:
         plt.rcParams['figure.figsize'] = (12, 8)
         plt.rcParams['font.size'] = 11
     
+    def _save_fig(self, save_path: Optional[str] = None, dpi: int = 150):
+        """Save the figure as both the original format and a lossless vector PDF."""
+        if not save_path:
+            return
+        plt.savefig(save_path, dpi=dpi, bbox_inches='tight')
+        
+        # Save as PDF if not already a PDF
+        base, ext = os.path.splitext(save_path)
+        if ext.lower() != '.pdf':
+            pdf_path = base + '.pdf'
+            plt.savefig(pdf_path, bbox_inches='tight')
+            print(f"[HSI] Saved additional PDF figure to {pdf_path}")
+    
     def plot_correlation_heatmap(self, save_path: Optional[str] = None):
         """Heatmap of Fisher z-aggregated ρ̄. * = 95% CI excludes zero."""
         result = self.analyzer._result
@@ -1134,7 +1147,7 @@ class HeadVisualization:
                      f'* = 95% CI excludes zero | A=consistent, B=risk-dependent')
         plt.tight_layout()
         if save_path:
-            plt.savefig(save_path, dpi=150, bbox_inches='tight')
+            self._save_fig(save_path, dpi=150)
         return fig
     
     def plot_hsi_bar(self, save_path: Optional[str] = None):
@@ -1170,7 +1183,7 @@ class HeadVisualization:
         
         plt.tight_layout()
         if save_path:
-            plt.savefig(save_path, dpi=150, bbox_inches='tight')
+            self._save_fig(save_path, dpi=150)
         return fig
     
     def plot_risk_profile(self, head_idx: int, save_path: Optional[str] = None):
@@ -1261,7 +1274,7 @@ class HeadVisualization:
         
         plt.tight_layout()
         if save_path:
-            plt.savefig(save_path, dpi=150, bbox_inches='tight')
+            self._save_fig(save_path, dpi=150)
         return fig
     
     def plot_per_episode_rho_scatter(self, head_idx: int, feature_key: str,
@@ -1293,7 +1306,7 @@ class HeadVisualization:
         
         plt.tight_layout()
         if save_path:
-            plt.savefig(save_path, dpi=150, bbox_inches='tight')
+            self._save_fig(save_path, dpi=150)
         return fig
     
     def plot_timeseries_diagnostic(self, scenario_idx: int = 0,
@@ -1450,7 +1463,7 @@ class HeadVisualization:
         
         plt.tight_layout()
         if save_path:
-            plt.savefig(save_path, dpi=150, bbox_inches='tight')
+            self._save_fig(save_path, dpi=150)
         return fig
 
 

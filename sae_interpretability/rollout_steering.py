@@ -47,6 +47,14 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
+
+from sae_interpretability.utils import (
+    apply_phd_style,
+    save_figure,
+    PHD_BLUE, PHD_ORANGE, PHD_GREEN, PHD_PURPLE, PHD_GRAY, PHD_TEAL,
+)
+
+apply_phd_style()
 from waymax import datatypes as waymax_datatypes
 
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../.."))
@@ -512,6 +520,7 @@ class RolloutSteerer(CausalSteerer):
             plot_rollout_metrics(
                 summary, temperatures, feature_idx, out_dir,
                 feature_name=feature_name,
+                all_scenarios=all_scenarios,
             )
             plot_action_trajectories(
                 all_scenarios, temperatures, feature_idx, out_dir,
@@ -731,9 +740,27 @@ def plot_rollout_metrics(
     feature_idx: int,
     out_dir: Path,
     feature_name: str = "",
+    all_scenarios: Optional[List[Dict]] = None,
 ) -> None:
-    """Bar chart of mean Δmetric per temperature for each vmax metric."""
-    label = feature_name if feature_name else str(feature_idx)
+    """Per-scenario + aggregate bar charts of Δmetric per steering temperature.
+
+    One figure is produced **per scenario** (showing every metric as a
+    subplot column, one bar per temperature).  An additional *aggregate*
+    figure shows the cross-scenario mean ± std.  All figures are saved in
+    both PNG (300 dpi) and PDF (vector) formats.
+
+    Args:
+        summary:        Cross-scenario summary from ``_summarise_rollout_results``.
+        temperatures:   List of steering temperatures α.
+        feature_idx:    SAE feature index being steered.
+        out_dir:        Output directory (PNG + PDF written here).
+        feature_name:   Human-readable feature label.
+        all_scenarios:  Raw per-scenario results for individual figures.
+    """
+    label     = feature_name if feature_name else str(feature_idx)
+    safe_name = label.replace(' ', '_')
+    out_dir   = Path(out_dir)
+
     metric_names: List[str] = []
     for alpha in temperatures:
         key = f"alpha_{alpha:+.2f}"
@@ -745,48 +772,109 @@ def plot_rollout_metrics(
         return
 
     n_metrics = len(metric_names)
-    fig, axes = plt.subplots(1, n_metrics, figsize=(4 * n_metrics, 4), sharey=False)
-    if n_metrics == 1:
-        axes = [axes]
+    n_temps   = len(temperatures)
 
-    colors_pos = '#4C72B0'
-    colors_neg = '#DD8452'
+    # ── Sub-directory for per-scenario figures ────────────────────────────
+    scen_dir = out_dir / f'f{feature_idx}_{safe_name}' / 'metrics_per_scenario'
+    scen_dir.mkdir(parents=True, exist_ok=True)
+
+    # ── 1.  Per-scenario figures ──────────────────────────────────────────
+    if all_scenarios:
+        for scen in all_scenarios:
+            scen_id = scen.get('scenario_id', 0)
+
+            # Collect per-scenario delta values
+            scen_means: Dict[str, List[float]] = {mn: [] for mn in metric_names}
+            for temp_result in scen.get('temperatures', []):
+                dm = temp_result.get('delta_metrics', {})
+                for mn in metric_names:
+                    scen_means[mn].append(dm.get(mn, float('nan')))
+
+            fig, axes = plt.subplots(
+                1, n_metrics,
+                figsize=(max(4, 3 * n_metrics), 4.5),
+                sharey=False,
+                squeeze=False,
+            )
+            axes = axes[0]  # shape (n_metrics,)
+
+            for ax, mn in zip(axes, metric_names):
+                vals      = np.array(scen_means[mn])
+                bar_cols  = [PHD_TEAL if v >= 0 else PHD_ORANGE for v in vals]
+                x         = np.arange(n_temps)
+
+                ax.bar(x, vals, color=bar_cols, edgecolor='white',
+                       alpha=0.88, width=0.65)
+                ax.axhline(0, color='#888', linewidth=1.0, linestyle='--')
+                ax.set_xticks(x)
+                ax.set_xticklabels(
+                    [f"{a:+.1f}" for a in temperatures],
+                    fontsize=8, rotation=45, ha='right',
+                )
+                ax.set_title(mn.replace('_', ' '), fontsize=9, fontweight='bold')
+                ax.set_xlabel('α (steering temperature)', fontsize=8)
+                ax.set_ylabel('Δ (steered − baseline)', fontsize=8)
+                ax.tick_params(labelsize=7)
+                ax.spines['top'].set_visible(False)
+                ax.spines['right'].set_visible(False)
+
+            fig.suptitle(
+                f"'{label}' (f{feature_idx}) — Scenario {scen_id}: Δmetric per α",
+                fontsize=12, fontweight='bold', y=1.02,
+            )
+            plt.tight_layout()
+            stem = f'scenario_{scen_id:02d}_metrics'
+            save_figure(fig, scen_dir, stem)
+            plt.close(fig)
+
+    # ── 2. Aggregate figure (mean ± std across all scenarios) ─────────────
+    fig, axes = plt.subplots(
+        1, n_metrics,
+        figsize=(max(5, 3.5 * n_metrics), 5),
+        sharey=False,
+        squeeze=False,
+    )
+    axes = axes[0]  # shape (n_metrics,)
 
     for ax, mn in zip(axes, metric_names):
-        means = []
-        stds  = []
-        for alpha in temperatures:
-            key = f"alpha_{alpha:+.2f}"
-            stats = summary.get(key, {}).get('metrics', {}).get(mn, {})
-            means.append(stats.get('mean', float('nan')))
-            stds.append(stats.get('std', 0.0))
+        means_arr = np.array([
+            summary.get(f"alpha_{a:+.2f}", {}).get('metrics', {}).get(mn, {}).get('mean', float('nan'))
+            for a in temperatures
+        ])
+        stds_arr  = np.array([
+            summary.get(f"alpha_{a:+.2f}", {}).get('metrics', {}).get(mn, {}).get('std', 0.0)
+            for a in temperatures
+        ])
+        bar_cols  = [PHD_TEAL if m >= 0 else PHD_ORANGE for m in means_arr]
+        x         = np.arange(n_temps)
 
-        means_arr = np.array(means)
-        stds_arr  = np.array(stds)
-        bar_colors = [colors_pos if m >= 0 else colors_neg for m in means_arr]
-
-        ax.bar(range(len(temperatures)), means_arr, yerr=stds_arr,
-               color=bar_colors, capsize=4, edgecolor='white', alpha=0.85)
-        ax.axhline(0, color='crimson', linewidth=1.0, linestyle='--')
-        ax.set_xticks(range(len(temperatures)))
-        ax.set_xticklabels([f"{a:+.1f}" for a in temperatures], fontsize=8, rotation=45)
-        ax.set_title(mn, fontsize=9, fontweight='bold')
-        ax.set_xlabel('α', fontsize=8)
+        ax.bar(x, means_arr, yerr=stds_arr, color=bar_cols,
+               edgecolor='white', alpha=0.88, capsize=5, width=0.65,
+               error_kw=dict(elinewidth=1.2, ecolor=PHD_GRAY))
+        ax.axhline(0, color='#888', linewidth=1.0, linestyle='--')
+        ax.set_xticks(x)
+        ax.set_xticklabels(
+            [f"{a:+.1f}" for a in temperatures],
+            fontsize=8, rotation=45, ha='right',
+        )
+        ax.set_title(mn.replace('_', ' '), fontsize=9, fontweight='bold')
+        ax.set_xlabel('α (steering temperature)', fontsize=8)
         ax.set_ylabel('Δ (steered − baseline)', fontsize=8)
         ax.tick_params(labelsize=7)
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
 
     fig.suptitle(
-        f"'{label}' (idx {feature_idx}) — Δmetric per temperature",
-        fontsize=12, fontweight='bold',
+        f"'{label}' (f{feature_idx}) — Aggregate Δmetric per α "
+        f"(mean ± std over scenarios)",
+        fontsize=12, fontweight='bold', y=1.02,
     )
     plt.tight_layout()
-    safe_name = label.replace(' ', '_')
-    out_path = out_dir / f'f{feature_idx}_{safe_name}_rollout_metrics.png'
-    fig.savefig(out_path, dpi=130, bbox_inches='tight')
+    agg_dir = out_dir / f'f{feature_idx}_{safe_name}'
+    agg_dir.mkdir(parents=True, exist_ok=True)
+    save_figure(fig, agg_dir, 'aggregate_metrics')
     plt.close(fig)
-    print(f"[RolloutSteerer] Plot → {out_path}")
-
-
+    print(f"[RolloutSteerer] Metrics plots → {agg_dir}/")
 
 
 def plot_action_trajectories(
@@ -796,65 +884,96 @@ def plot_action_trajectories(
     out_dir: Path,
     feature_name: str = "",
 ) -> None:
-    """For each temperature, plot baseline vs steered accel and steer over time.
+    """One figure per scenario per temperature: baseline vs steered trajectories.
 
-    One figure per temperature.  Each figure has 2 rows (accel, steer) x
-    n_scenarios columns.
+    Each figure contains 2 rows (acceleration, steering angle) and 2 columns
+    (baseline | steered), with a shared x-axis (timestep).
+    All figures are saved in both PNG (300 dpi) and PDF (vector) formats.
+
+    Output structure::
+
+        <out_dir>/f<idx>_<name>/trajectories_per_scenario/
+            scenario_00_alpha_p1_0.png
+            scenario_00_alpha_p1_0.pdf
+            ...
     """
-    label = feature_name if feature_name else str(feature_idx)
+    label     = feature_name if feature_name else str(feature_idx)
     safe_name = label.replace(' ', '_')
-    n_scen = len(all_scenarios)
+    out_dir   = Path(out_dir)
+    n_scen    = len(all_scenarios)
     if n_scen == 0:
         return
 
-    for alpha in temperatures:
-        fig, axes = plt.subplots(
-            2, n_scen, figsize=(4 * n_scen, 6), sharey='row', squeeze=False
-        )
+    traj_dir = out_dir / f'f{feature_idx}_{safe_name}' / 'trajectories_per_scenario'
+    traj_dir.mkdir(parents=True, exist_ok=True)
 
-        for si, scen in enumerate(all_scenarios):
+    for alpha in temperatures:
+        alpha_str = f"{alpha:+.1f}".replace('+', 'p').replace('-', 'n').replace('.', '_')
+
+        for scen in all_scenarios:
+            scen_id     = scen.get('scenario_id', 0)
             temp_result = next(
                 (r for r in scen['temperatures'] if r['alpha'] == alpha), None
             )
             if temp_result is None:
                 continue
 
-            for dim_idx, dim_name in enumerate(['accel', 'steer']):
-                ax = axes[dim_idx, si]
+            # ── 2-row × 2-col layout: (accel|steer) × (baseline|steered) ──
+            fig, axes = plt.subplots(
+                2, 2,
+                figsize=(10, 6),
+                sharex=True,
+                gridspec_kw={'hspace': 0.38, 'wspace': 0.25},
+            )
 
-                # per_step_baseline/steered are now dict-of-lists: {'accel': [...], 'steer': [...]}
-                b_vals = temp_result['per_step_baseline'].get(dim_name, [])
-                s_vals = temp_result['per_step_steered'].get(dim_name, [])
+            col_labels = ['Baseline', f'Steered  α={alpha:+.1f}']
+            row_labels  = ['Acceleration', 'Steering angle']
+            dim_keys    = ['accel', 'steer']
+            col_data    = [
+                temp_result.get('per_step_baseline', {}),
+                temp_result.get('per_step_steered',  {}),
+            ]
+            col_colors  = [PHD_BLUE, PHD_ORANGE]
 
-                b_t = list(range(len(b_vals)))
-                s_t = list(range(len(s_vals)))
+            for row_idx, (dim_name, row_label) in enumerate(zip(dim_keys, row_labels)):
+                for col_idx, (data_dict, col_label, color) in enumerate(
+                    zip(col_data, col_labels, col_colors)
+                ):
+                    ax   = axes[row_idx, col_idx]
+                    vals = data_dict.get(dim_name, [])
+                    t    = np.arange(len(vals))
 
-                ax.plot(b_t, b_vals, color='#4C72B0', linewidth=1.4,
-                        label='baseline', alpha=0.9)
-                ax.plot(s_t, s_vals, color='#DD8452', linewidth=1.4,
-                        linestyle='--', label=f'steered α={alpha:+.1f}', alpha=0.9)
-                ax.axhline(0, color='gray', linewidth=0.6, linestyle=':')
+                    ax.plot(t, vals, color=color, linewidth=1.8, alpha=0.92)
+                    ax.fill_between(t, 0, vals, color=color, alpha=0.12)
+                    ax.axhline(0, color='#aaa', linewidth=0.7, linestyle=':')
 
-                if si == 0:
-                    ax.set_ylabel(dim_name, fontsize=9)
-                if dim_idx == 0:
-                    ax.set_title(f'Scenario {si}', fontsize=9)
-                if dim_idx == 1:
-                    ax.set_xlabel('timestep', fontsize=8)
-                if si == 0 and dim_idx == 0:
-                    ax.legend(fontsize=7)
-                ax.tick_params(labelsize=7)
+                    # Row labels (left column only)
+                    if col_idx == 0:
+                        ax.set_ylabel(row_label, fontsize=10)
+                    # Column headers (top row only)
+                    if row_idx == 0:
+                        ax.set_title(col_label, fontsize=10, fontweight='bold',
+                                     color=color)
+                    # X-label (bottom row only)
+                    if row_idx == 1:
+                        ax.set_xlabel('Timestep', fontsize=9)
 
-        fig.suptitle(
-            f"'{label}' (idx {feature_idx}) — Action trajectories  α={alpha:+.1f}",
-            fontsize=12, fontweight='bold',
-        )
-        plt.tight_layout()
-        alpha_str = f"{alpha:+.1f}".replace('+', 'p').replace('-', 'n').replace('.', '_')
-        out_path = out_dir / f'f{feature_idx}_{safe_name}_a{alpha_str}_trajectories.png'
-        fig.savefig(out_path, dpi=130, bbox_inches='tight')
-        plt.close(fig)
-        print(f"[RolloutSteerer] Plot → {out_path}")
+                    ax.tick_params(labelsize=8)
+                    ax.spines['top'].set_visible(False)
+                    ax.spines['right'].set_visible(False)
+                    ax.grid(axis='y', linewidth=0.5, alpha=0.4)
+
+            fig.suptitle(
+                f"'{label}' (f{feature_idx}) — Scenario {scen_id}  α={alpha:+.1f}: "
+                f"Action Trajectories",
+                fontsize=12, fontweight='bold', y=1.01,
+            )
+
+            stem = f'scenario_{scen_id:02d}_alpha_{alpha_str}'
+            save_figure(fig, traj_dir, stem)
+            plt.close(fig)
+
+    print(f"[RolloutSteerer] Trajectory plots → {traj_dir}/")
 
 
 # ---------------------------------------------------------------------------
