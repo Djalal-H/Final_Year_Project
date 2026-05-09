@@ -71,6 +71,10 @@ def run_training_off_policy(
             env_steps=training_state.env_steps + jnp.prod(jnp.array(data.done.shape)),
         )
 
+        # Strip extras (attention weights etc.) before storing — the replay buffer
+        # dummy_data_sample has extras=() so shapes must match at insert time.
+        data = data._replace(extras=())
+
         # (unroll_length, num_envs, ...) -> (num_envs * unroll_length, ...)
         data = jax.tree_util.tree_map(lambda x: jnp.reshape(x, (-1,) + x.shape[2:]), data)
         buffer_state = replay_buffer.insert(buffer_state, data)
