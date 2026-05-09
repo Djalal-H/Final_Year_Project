@@ -107,6 +107,33 @@ def _load_telemetry(hf: h5py.File) -> Dict[str, np.ndarray]:
     agent_valid: Optional[np.ndarray] = None
     if 'telemetry/agent_valid' in hf:
         agent_valid = hf['telemetry/agent_valid'][:].astype(bool)
+        valid_frac = agent_valid.mean()
+        n_timesteps_no_agents = int((agent_valid.sum(axis=1) == 0).sum())
+        print(f"[Telemetry] agent_valid found — shape={agent_valid.shape}, "
+              f"valid_frac={valid_frac:.3f}, "
+              f"timesteps_with_no_valid_agent={n_timesteps_no_agents}/{agent_valid.shape[0]}")
+    else:
+        # List what keys ARE present under telemetry/ to help diagnose
+        tel_keys_present = [k for k in hf.keys() if k == 'telemetry']
+        if 'telemetry' in hf:
+            present = sorted(hf['telemetry'].keys())
+        else:
+            present = []
+        print(f"[Telemetry] WARNING: 'telemetry/agent_valid' NOT found in HDF5. "
+              f"Will fall back to unmasked reductions (agent_dists_min will be wrong).\n"
+              f"           Keys present under telemetry/: {present}")
+
+    # Diagnostic: show unique-value counts for fields known to be problematic
+    for _diag_key in ('min_agent_dist',):
+        _path = f'telemetry/{_diag_key}'
+        if _path in hf:
+            _arr = hf[_path][:].astype(np.float32)
+            _unique = np.unique(_arr)
+            print(f"[Telemetry] {_diag_key}: shape={_arr.shape}, "
+                  f"n_unique={len(_unique)}, "
+                  f"min={_arr.min():.4f}, max={_arr.max():.4f}, "
+                  f"mean={_arr.mean():.4f}"
+                  + (f", unique_vals={_unique.tolist()}" if len(_unique) <= 5 else ""))
 
     for k, stats in _AGENT_KEYS_TO_SUMMARIZE:
         path = f'telemetry/{k}'
