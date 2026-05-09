@@ -43,7 +43,9 @@ The contribution of this chapter is a principled, end-to-end mechanistic interpr
 
 A transformer-based policy processes environmental observations through a sequence of alternating self-attention and feedforward sublayers. Each sublayer contributes an additive update to a shared residual stream, which persists across the depth of the network. Formally, if $\mathbf{h}^{(\ell)} \in \mathbb{R}^D$ denotes the residual stream vector at layer $\ell$, the transformer dynamics can be written as:
 
-$$\mathbf{h}^{(\ell+1)} = \mathbf{h}^{(\ell)} + \Delta^{(\ell)}_{\text{attn}}(\mathbf{h}^{(\ell)}) + \Delta^{(\ell)}_{\text{ff}}(\mathbf{h}^{(\ell)})$$
+$$
+\mathbf{h}^{(\ell+1)} = \mathbf{h}^{(\ell)} + \Delta^{(\ell)}_{\text{attn}}(\mathbf{h}^{(\ell)}) + \Delta^{(\ell)}_{\text{ff}}(\mathbf{h}^{(\ell)})
+$$
 
 where $\Delta^{(\ell)}_{\text{attn}}$ and $\Delta^{(\ell)}_{\text{ff}}$ denote the additive contributions of the attention and feedforward sublayers, respectively. The final residual stream $\mathbf{h}^{(L)} \in \mathbb{R}^D$ — often referred to as the encoder output or the bottleneck representation — is subsequently projected by task-specific linear heads to produce policy logits or value estimates.
 
@@ -57,7 +59,9 @@ The *superposition hypothesis*, articulated formally in the mechanistic interpre
 
 Formally, consider a set of $n$ binary features $\{f_1, \ldots, f_n\}$ with $n \gg D$. Superposition encodes these features as a set of direction vectors $\{\mathbf{d}_1, \ldots, \mathbf{d}_n\} \subset \mathbb{R}^D$, where the activation of feature $f_k$ contributes an additive increment $f_k \mathbf{d}_k$ to the residual stream:
 
-$$\mathbf{h} = \sum_{k=1}^{n} f_k \mathbf{d}_k + \boldsymbol{\epsilon}$$
+$$
+\mathbf{h} = \sum_{k=1}^{n} f_k \mathbf{d}_k + \boldsymbol{\epsilon}
+$$
 
 where $\boldsymbol{\epsilon}$ represents noise from simultaneous feature activations that interfere with one another. The signal-to-noise ratio of feature recovery is controlled by the sparsity of the feature activation pattern: if at most $s$ features are simultaneously active, and the directions $\mathbf{d}_k$ are drawn from a random polytope configuration, the reconstruction error scales as $O(s/D)$ rather than $O(n/D)$, making superposition tractable when $s \ll n$.
 
@@ -67,17 +71,23 @@ The implication for interpretability is significant: individual neurons or linea
 
 The mathematical framework of sparse coding, developed in the signal processing and computational neuroscience literature, provides the theoretical foundation for decomposing superposed representations. In sparse coding, a signal $\mathbf{x} \in \mathbb{R}^D$ is modeled as a sparse linear combination of dictionary atoms $\{\mathbf{d}_j\}_{j=1}^{F}$ drawn from an overcomplete dictionary $\mathbf{D} \in \mathbb{R}^{D \times F}$ with $F > D$:
 
-$$\mathbf{x} \approx \sum_{j=1}^{F} f_j \mathbf{d}_j = \mathbf{D}\mathbf{f}, \quad \|\mathbf{f}\|_0 \ll F$$
+$$
+\mathbf{x} \approx \sum_{j=1}^{F} f_j \mathbf{d}_j = \mathbf{D}\mathbf{f}, \quad \|\mathbf{f}\|_0 \ll F
+$$
 
 The pursuit of sparse representations in an overcomplete basis provides a mechanism by which the true structure of superposed activations can be disentangled. If each dictionary atom $\mathbf{d}_j$ corresponds to a single semantic concept, and if the coding coefficients $\mathbf{f}$ are genuinely sparse, then the decomposition reveals which concepts are active in any given observation by examining which coefficients are non-zero.
 
 The classical sparse coding problem minimizes a reconstruction penalty subject to a cardinality constraint on the representation:
 
-$$\min_{\mathbf{f}} \|\mathbf{x} - \mathbf{D}\mathbf{f}\|_2^2 \quad \text{s.t.} \quad \|\mathbf{f}\|_0 \leq s$$
+$$
+\min_{\mathbf{f}} \|\mathbf{x} - \mathbf{D}\mathbf{f}\|_2^2 \quad \text{s.t.} \quad \|\mathbf{f}\|_0 \leq s
+$$
 
 Because the $\ell_0$ norm is combinatorially intractable, a standard convex relaxation replaces it with the $\ell_1$ norm, yielding the Lasso formulation:
 
-$$\min_{\mathbf{f}} \|\mathbf{x} - \mathbf{D}\mathbf{f}\|_2^2 + \lambda \|\mathbf{f}\|_1$$
+$$
+\min_{\mathbf{f}} \|\mathbf{x} - \mathbf{D}\mathbf{f}\|_2^2 + \lambda \|\mathbf{f}\|_1
+$$
 
 The $\ell_1$ penalty promotes sparsity by inducing many coefficients to collapse to exactly zero, while penalizing large but non-zero coefficients proportionally to their magnitude.
 
@@ -85,33 +95,45 @@ The $\ell_1$ penalty promotes sparsity by inducing many coefficients to collapse
 
 Sparse autoencoders (SAEs) operationalize the sparse coding principle within a learnable end-to-end framework. An SAE consists of an encoder mapping $\mathbf{x} \mapsto \mathbf{f}$ and a decoder mapping $\mathbf{f} \mapsto \hat{\mathbf{x}}$, trained jointly to minimize a combination of reconstruction fidelity and sparsity:
 
-$$\mathcal{L}(\mathbf{x}) = \underbrace{\|\mathbf{x} - \hat{\mathbf{x}}\|_2^2}_{\text{reconstruction}} + \underbrace{\lambda \cdot \Omega(\mathbf{f})}_{\text{sparsity}}$$
+$$
+\mathcal{L}(\mathbf{x}) = \underbrace{\|\mathbf{x} - \hat{\mathbf{x}}\|_2^2}_{\text{reconstruction}} + \underbrace{\lambda \cdot \Omega(\mathbf{f})}_{\text{sparsity}}
+$$
 
 where $\Omega(\mathbf{f})$ is a sparsity-inducing regularizer. In the formulation adopted in this work, following the conventions established by Anthropic's interpretability research program, the encoder applies a learned affine transformation followed by a rectified linear unit:
 
-$$\mathbf{f} = \text{ReLU}\!\left((\mathbf{x} - \mathbf{b}_{\text{pre}}) \mathbf{W}_{\text{enc}} + \mathbf{b}_{\text{enc}}\right), \quad \mathbf{W}_{\text{enc}} \in \mathbb{R}^{D \times F}$$
+$$
+\mathbf{f} = \text{ReLU}\!\left((\mathbf{x} - \mathbf{b}_{\text{pre}}) \mathbf{W}_{\text{enc}} + \mathbf{b}_{\text{enc}}\right), \quad \mathbf{W}_{\text{enc}} \in \mathbb{R}^{D \times F}
+$$
 
 The pre-encoder bias $\mathbf{b}_{\text{pre}} \in \mathbb{R}^D$ functions as a learned centroid that re-centers the residual stream distribution before the encoding projection, enabling the encoder to operate in a zero-mean coordinate frame aligned with the principal structure of the activation manifold.
 
 The decoder applies a learned linear transformation with no activation function:
 
-$$\hat{\mathbf{x}} = \mathbf{f} \mathbf{W}_{\text{dec}} + \mathbf{b}_{\text{dec}}, \quad \mathbf{W}_{\text{dec}} \in \mathbb{R}^{F \times D}$$
+$$
+\hat{\mathbf{x}} = \mathbf{f} \mathbf{W}_{\text{dec}} + \mathbf{b}_{\text{dec}}, \quad \mathbf{W}_{\text{dec}} \in \mathbb{R}^{F \times D}
+$$
 
 A critical architectural constraint is imposed on the decoder weight matrix: each row $\mathbf{w}_j^{\text{dec}} \in \mathbb{R}^D$ is constrained to unit norm:
 
-$$\|\mathbf{w}_j^{\text{dec}}\|_2 = 1 \quad \forall j \in \{1, \ldots, F\}$$
+$$
+\|\mathbf{w}_j^{\text{dec}}\|_2 = 1 \quad \forall j \in \{1, \ldots, F\}
+$$
 
 This constraint enforces that each decoder row defines a direction in residual stream space, rather than simultaneously encoding both magnitude and direction. The magnitude of a feature's contribution is thus entirely governed by the scalar activation coefficient $f_j$, while the direction is fixed as the unit vector $\mathbf{w}_j^{\text{dec}}$. This factorization is essential for interpretability: it ensures that the latent dimension $j$ is associated with a well-defined, stable feature direction in the residual stream.
 
-The sparsity term in the training objective is:
+The sparsity term in the training objective is the $\ell_1$ norm of the feature activation vector, averaged over the batch:
 
-$$\Omega(\mathbf{f}) = \frac{1}{N} \sum_{i=1}^{N} \sum_{j=1}^{F} f_{ij}$$
+$$
+\Omega(\mathbf{f}) = \frac{1}{N} \sum_{i=1}^{N} \|\mathbf{f}_i\|_1
+$$
 
-which, given that $\mathbf{f} \geq 0$ after ReLU, is equivalent to the $\ell_1$ norm of the feature activations per sample, summed over features and averaged over the batch. Critically, the sparsity penalty is computed as the per-sample total activation budget (the sum over feature dimensions $j$, averaged over batch dimension $N$), rather than a diluted element-wise mean over the full $N \times F$ matrix. This formulation ensures that the coefficient $\lambda$ controls the total allowed activation per observation, making its interpretation invariant to the expansion factor $F/D$.
+Since $\mathbf{f} \geq 0$ after ReLU, the $\ell_1$ norm reduces to $\|\mathbf{f}_i\|_1 = \sum_{j=1}^{F} f_{ij}$ — the total activation budget per observation. Critically, the sparsity penalty is computed as the per-sample $\ell_1$ norm averaged over the batch, rather than a diluted element-wise mean over the full $N \times F$ matrix. This formulation ensures that the coefficient $\lambda$ controls the total allowed activation per observation, making its interpretation invariant to the expansion factor $F/D$.
 
 The combined training objective is therefore:
 
-$$\mathcal{L} = \frac{1}{N}\sum_{i=1}^{N} \|\mathbf{x}_i - \hat{\mathbf{x}}_i\|_2^2 + \lambda \cdot \frac{1}{N}\sum_{i=1}^{N} \sum_{j=1}^{F} f_{ij}$$
+$$
+\mathcal{L} = \frac{1}{N}\sum_{i=1}^{N} \|\mathbf{x}_i - \hat{\mathbf{x}}_i\|_2^2 + \lambda \cdot \frac{1}{N}\sum_{i=1}^{N} \|\mathbf{f}_i\|_1
+$$
 
 ### 2.5 Monosemanticity and Disentangled Representations
 
@@ -127,7 +149,7 @@ The expansion factor $\gamma = F/D$ — the ratio of SAE latent dimensionality t
 
 The choice of expansion factor represents a fundamental trade-off. A higher $\gamma$ increases the expressivity of the dictionary, enabling the SAE to represent a richer and more fine-grained set of semantic concepts. However, it also increases the risk of feature collapse — where multiple dictionary atoms converge to represent the same concept — and of dead features — dictionary atoms that never activate across the training dataset. A higher expansion factor also imposes greater computational demands during training and inference.
 
-In the framework described here, an expansion factor of $\gamma = 16$ is employed, yielding a latent dimensionality of $F = 16D$. This choice is motivated by empirical precedents in the SAE literature applied to large language models, where expansion factors of 8–32 have been found to produce a favorable balance between concept coverage and feature quality. In the autonomous driving domain, the conceptual vocabulary required to describe driving behavior — speed regimes, proximity to surrounding agents, safety-critical events, lateral dynamics — is rich but not unbounded, suggesting that an order-of-magnitude expansion is appropriate.
+In the framework described here, the expansion factor $\gamma$ is treated as a hyperparameter and searched over a discrete grid (see Section 5.3). Empirical precedents in the SAE literature applied to large language models suggest that expansion factors of 8–32 produce a favorable balance between concept coverage and feature quality. In the autonomous driving domain, the conceptual vocabulary required to describe driving behavior — speed regimes, proximity to surrounding agents, safety-critical events, lateral dynamics — is rich but not unbounded, suggesting that expansion values of $\mathcal{O}(10)$ are a principled starting point for the search.
 
 ### 2.7 Sparsity Metrics
 
@@ -135,13 +157,17 @@ Two complementary sparsity metrics are employed to characterize the quality of l
 
 **$\ell_0$ sparsity** measures the average number of active (non-zero) features per observation:
 
-$$L_0 = \frac{1}{N} \sum_{i=1}^{N} \|\mathbf{f}_i\|_0 = \frac{1}{N} \sum_{i=1}^{N} \sum_{j=1}^{F} \mathbf{1}[f_{ij} > 0]$$
+$$
+L_0 = \frac{1}{N} \sum_{i=1}^{N} \|\mathbf{f}_i\|_0 = \frac{1}{N} \sum_{i=1}^{N} \sum_{j=1}^{F} \mathbf{1}[f_{ij} > 0]
+$$
 
 A low $L_0$ value indicates that only a small fraction of features activate for any given observation, consistent with the monosemanticity hypothesis. As a reference: in a perfectly sparse regime, $L_0 \ll F$; in a fully dense regime, $L_0 = F$.
 
 **Dead feature percentage** measures the fraction of dictionary atoms that never activate across a representative sample of observations:
 
-$$\text{Dead\%} = \frac{1}{F} \sum_{j=1}^{F} \mathbf{1}\!\left[\max_{i} f_{ij} = 0\right] \times 100$$
+$$
+\text{Dead\%} = \frac{1}{F} \sum_{j=1}^{F} \mathbf{1}\!\left[\max_{i} f_{ij} = 0\right] \times 100
+$$
 
 Dead features represent wasted representational capacity and indicate that the effective dictionary size is smaller than the nominal expansion factor would suggest. Excessive dead features are associated with suboptimal training dynamics, often arising from a mismatch between the sparsity coefficient $\lambda$ and the intrinsic dimensionality of the activation distribution.
 
@@ -199,13 +225,17 @@ Beyond scalar summaries, per-agent arrays are computed for each timestep, captur
 
 Agent spatial classification is performed in the ego-local coordinate frame: an agent at global position $(x_a, y_a)$ relative to ego position $(x_e, y_e)$ with ego heading $\psi$ is transformed to local coordinates:
 
-$$\begin{pmatrix} x_{\text{local}} \\ y_{\text{local}} \end{pmatrix} = \begin{pmatrix} \cos(-\psi) & -\sin(-\psi) \\ \sin(-\psi) & \cos(-\psi) \end{pmatrix} \begin{pmatrix} x_a - x_e \\ y_a - y_e \end{pmatrix}$$
+$$
+\begin{pmatrix} x_{\text{local}} \\ y_{\text{local}} \end{pmatrix} = \begin{pmatrix} \cos(-\psi) & -\sin(-\psi) \\ \sin(-\psi) & \cos(-\psi) \end{pmatrix} \begin{pmatrix} x_a - x_e \\ y_a - y_e \end{pmatrix}
+$$
 
 Agents with $x_{\text{local}} > 2.0\,\text{m}$ are classified as ahead; those with $y_{\text{local}} > 1.0\,\text{m}$ are classified as to the left; those with $y_{\text{local}} < -1.0\,\text{m}$ are to the right. This ego-centric geometric classification ensures that spatial relationships are defined in terms of the agent's own frame of reference, which is the natural coordinate system for driving decisions.
 
 Time-to-collision is computed using the standard kinematic formula:
 
-$$\text{TTC}_{a} = \begin{cases} \frac{d_a}{v_{\text{close},a}} & \text{if } v_{\text{close},a} > 0.5\,\text{m/s} \\ T_{\text{horizon}} & \text{otherwise} \end{cases}$$
+$$
+\text{TTC}_{a} = \begin{cases} \frac{d_a}{v_{\text{close},a}} & \text{if } v_{\text{close},a} > 0.5\,\text{m/s} \\ T_{\text{horizon}} & \text{otherwise} \end{cases}
+$$
 
 where $d_a$ denotes the distance to agent $a$, $v_{\text{close},a} = -(d\mathbf{x}_a \cdot \mathbf{v}_{\text{rel}}) / d_a$ is the closing speed, and $T_{\text{horizon}}$ is a saturation constant applied in the non-closing case to prevent numerical instability. The minimum TTC across all valid agents provides a global safety margin estimate.
 
@@ -225,7 +255,9 @@ This section provides a detailed account of the SAE training methodology, includ
 
 Prior to training, all harvested activations are normalized using empirical statistics computed over the full dataset:
 
-$$\tilde{\mathbf{x}} = \frac{\mathbf{x} - \boldsymbol{\mu}}{\boldsymbol{\sigma} + \epsilon}$$
+$$
+\tilde{\mathbf{x}} = \frac{\mathbf{x} - \boldsymbol{\mu}}{\boldsymbol{\sigma} + \epsilon}
+$$
 
 where $\boldsymbol{\mu} = \frac{1}{N}\sum_{i=1}^N \mathbf{x}_i$ is the empirical mean vector, $\boldsymbol{\sigma} = \sqrt{\frac{1}{N}\sum_{i=1}^N (\mathbf{x}_i - \boldsymbol{\mu})^2}$ is the empirical standard deviation vector (computed element-wise), and $\epsilon = 10^{-8}$ is a numerical stability constant.
 
@@ -253,13 +285,17 @@ The SAE is trained using the Adam optimizer with a cosine annealing learning rat
 
 The cosine annealing schedule implements a smooth decay from the initial learning rate $\eta_0 = 3 \times 10^{-4}$ to zero over the course of training:
 
-$$\eta_t = \frac{\eta_0}{2}\left(1 + \cos\left(\frac{\pi t}{T}\right)\right)$$
+$$
+\eta_t = \frac{\eta_0}{2}\left(1 + \cos\left(\frac{\pi t}{T}\right)\right)
+$$
 
 where $t$ is the current epoch and $T$ is the total number of epochs. This schedule provides a large effective learning rate during the early training phase (when features are still poorly aligned with semantic directions) and progressively reduces the step size as features approach stable configurations, reducing the risk of oscillation around feature directions late in training.
 
 Gradient clipping is applied at each optimization step with a maximum gradient norm of 1.0:
 
-$$\mathbf{g} \leftarrow \mathbf{g} \cdot \min\!\left(1, \frac{1.0}{\|\mathbf{g}\|_2}\right)$$
+$$
+\mathbf{g} \leftarrow \mathbf{g} \cdot \min\!\left(1, \frac{1.0}{\|\mathbf{g}\|_2}\right)
+$$
 
 Gradient clipping prevents the large sparse updates that can occur when a previously inactive feature direction begins receiving gradient signal from a cluster of observations, and stabilizes the early stages of dictionary formation.
 
@@ -275,7 +311,9 @@ Feature collapse is mitigated by the unit-norm decoder constraint, which prevent
 
 **Dead features** are dictionary atoms that fail to activate for any observation in the training corpus. A feature $j$ is considered dead if:
 
-$$\sum_{i=1}^{N} \mathbf{1}[f_{ij} > 0] = 0$$
+$$
+\sum_{i=1}^{N} \mathbf{1}[f_{ij} > 0] = 0
+$$
 
 Dead features represent wasted representational capacity. Their prevalence is tracked throughout training via the dead feature percentage metric, evaluated on a fixed reference sample of up to 8,192 observations. Dead features arise when the encoder's weight initialization places a feature direction far from any activation cluster in the normalized residual stream, and the gradient of the sparsity penalty prevents the encoder from moving toward those clusters.
 
@@ -286,17 +324,26 @@ The sparsity coefficient $\lambda$ is the primary control for dead feature preva
 The combined training loss $\mathcal{L}$ is decomposed into three interpretable components that are monitored independently throughout training:
 
 **Reconstruction loss** (MSE):
-$$\mathcal{L}_{\text{recon}} = \frac{1}{N} \sum_{i=1}^{N} \|\tilde{\mathbf{x}}_i - \hat{\mathbf{x}}_i\|_2^2$$
+
+$$
+\mathcal{L}_{\text{recon}} = \frac{1}{N} \sum_{i=1}^{N} \|\tilde{\mathbf{x}}_i - \hat{\mathbf{x}}_i\|_2^2
+$$
 
 A declining reconstruction loss indicates that the decoder is learning to accurately reconstruct the residual stream from sparse feature activations. If the reconstruction loss plateaus early, it may indicate that the sparsity coefficient $\lambda$ is too large, preventing the encoder from activating enough features to reconstruct the input faithfully.
 
-**$\ell_1$ sparsity loss** (mean absolute feature activation):
-$$\mathcal{L}_{\text{sparse}} = \frac{1}{NF} \sum_{i=1}^{N} \sum_{j=1}^{F} f_{ij}$$
+**$\ell_1$ sparsity** (per-element mean $\ell_1$ norm, tracked as a diagnostic scalar):
 
-The $\ell_1$ loss should decrease during training as the encoder becomes more selective, preferring sparser activations for any given observation.
+$$
+\ell_1^{\text{diag}} = \frac{1}{NF} \sum_{i=1}^{N} \|\mathbf{f}_i\|_1
+$$
+
+This monitoring quantity is related to the training-objective sparsity term by $\ell_1^{\text{diag}} = \frac{1}{F}\,\Omega(\mathbf{f})$, and is therefore independent of both batch size and expansion factor, making it a scale-invariant proxy for sparsity pressure. $\ell_1^{\text{diag}}$ should decrease during training as the encoder becomes more selective, preferring sparser activations for any given observation.
 
 **$L_0$ sparsity** (mean number of active features):
-$$L_0 = \frac{1}{N} \sum_{i=1}^{N} \|\mathbf{f}_i\|_0$$
+
+$$
+L_0 = \frac{1}{N} \sum_{i=1}^{N} \|\mathbf{f}_i\|_0
+$$
 
 Unlike $\mathcal{L}_{\text{sparse}}$, $L_0$ is not differentiable and cannot be directly minimized. It serves as a diagnostic metric: a well-trained SAE should achieve $L_0 \ll F$, with typical values in the range of 5–50 active features per observation for an expansion factor of 16 applied to a $D$-dimensional residual stream.
 
@@ -322,27 +369,30 @@ The annotation procedure operationalizes a statistical approach to interpretabil
 
 The primary annotation method employed in this framework is Spearman rank correlation — a non-parametric measure of statistical dependence based on the ranks of the observations rather than their raw values. For a feature $j$ with activation vector $\mathbf{f}_j = (f_{1j}, \ldots, f_{Nj}) \in \mathbb{R}^N$ and a telemetry field $k$ with value vector $\mathbf{t}_k = (t_{1k}, \ldots, t_{Nk}) \in \mathbb{R}^N$, the Spearman correlation coefficient is:
 
-$$\rho_{jk} = 1 - \frac{6 \sum_{i=1}^N \left(\text{rank}(f_{ij}) - \text{rank}(t_{ik})\right)^2}{N(N^2 - 1)}$$
+$$
+\rho_{jk} = 1 - \frac{6 \sum_{i=1}^N \left(\text{rank}(f_{ij}) - \text{rank}(t_{ik})\right)^2}{N(N^2 - 1)}
+$$
 
 or equivalently, it is the Pearson correlation of the rank-transformed vectors.
 
 Spearman correlation is preferred over Pearson correlation for this task for several reasons:
 
 1. **Non-Gaussianity of feature activations**: SAE feature activations are heavily right-skewed (most observations have zero or near-zero activation, with a long tail of high activations in semantically relevant contexts). Pearson correlation assumes Gaussian marginals; Spearman does not.
-
 2. **Invariance to monotone nonlinearities**: Spearman $\rho$ is invariant under any monotone transformation of either variable. This means that a feature whose activation is a saturating function of ego-speed will yield the same $\rho$ with ego-speed as a feature whose activation is a linear function, provided the rank order is preserved.
-
 3. **Robustness to outliers**: Because ranks are bounded, extreme activation values in rare scenarios cannot inflate the correlation estimate arbitrarily.
-
 4. **Graceful handling of sparse activations**: For a very sparse feature (activating at $k \ll N$ timesteps), the $N - k$ zero activations all receive a tied rank of approximately $N/2$. The covariance between the feature's ranked activations and the telemetry's ranked activations is then driven entirely by the $k$ active timesteps. A feature that fires only 5 times but always during hard-braking events will correctly yield $\rho \approx 1.0$ with the hard-braking indicator, because the hard-braking timesteps will have high ranks in both the feature activation and the binary event vectors.
 
 The **selectivity score** of a feature is defined as the maximum absolute Spearman correlation across all telemetry fields:
 
-$$s_j = \max_{k} |\rho_{jk}|$$
+$$
+s_j = \max_{k} |\rho_{jk}|
+$$
 
 and its **semantic label** is the telemetry field achieving this maximum, annotated with the sign of the correlation:
 
-$$\ell_j = [\text{sign}(\rho_{j,k^*})] \cdot \text{telemetry\_field}_{k^*}, \quad k^* = \arg\max_k |\rho_{jk}|$$
+$$
+\ell_j = [\text{sign}(\rho_{j,k^*})] \cdot \text{telemetry\_field}_{k^*}, \quad k^* = \arg\max_k |\rho_{jk}|
+$$
 
 A feature with $\rho_{j,k^*} > 0$ fires more strongly when the corresponding telemetry variable is high; a feature with $\rho_{j,k^*} < 0$ fires more strongly when the telemetry variable is low. Both cases are informative.
 
@@ -350,7 +400,9 @@ A feature with $\rho_{j,k^*} > 0$ fires more strongly when the corresponding tel
 
 An alternative annotation strategy, applicable when Spearman correlation is insufficient (e.g., for boolean telemetry fields with very rare positive events), is z-score analysis of top-activating timesteps. For feature $j$, the $K$ timesteps at which the feature activation $f_{ij}$ is largest are identified, and the telemetry value at those timesteps is compared to the global telemetry distribution:
 
-$$z_{jk} = \frac{\bar{t}_{k,\text{top-}K} - \mu_{t_k}}{\sigma_{t_k}}$$
+$$
+z_{jk} = \frac{\bar{t}_{k,\text{top-}K} - \mu_{t_k}}{\sigma_{t_k}}
+$$
 
 where $\bar{t}_{k,\text{top-}K}$ is the mean value of telemetry field $k$ at the top-$K$ activation timesteps, and $\mu_{t_k}$, $\sigma_{t_k}$ are the global mean and standard deviation. A large positive z-score indicates that the feature fires preferentially in high-$t_k$ environments; a large negative z-score indicates preferential firing in low-$t_k$ environments.
 
@@ -402,36 +454,59 @@ Distinguishing between these possibilities requires intervention, not observatio
 
 The causal intervention protocol operates on the normalized residual stream. Given an observation $\mathbf{x}$ processed by the trained encoder to produce hidden state $\mathbf{h} \in \mathbb{R}^D$, the SAE encodes $\mathbf{h}$ to produce feature activations:
 
-$$\mathbf{f} = \text{ReLU}\!\left(\frac{\mathbf{h} - \boldsymbol{\mu}}{\boldsymbol{\sigma}} - \mathbf{b}_{\text{pre}}\right)\mathbf{W}_{\text{enc}} + \mathbf{b}_{\text{enc}}$$
+$$
+\mathbf{f} = \text{ReLU}\!\left(\frac{\mathbf{h} - \boldsymbol{\mu}}{\boldsymbol{\sigma}} - \mathbf{b}_{\text{pre}}\right)\mathbf{W}_{\text{enc}} + \mathbf{b}_{\text{enc}}
+$$
 
 To intervene on feature $j$ with steering intensity $\alpha \in \mathbb{R}$, the feature activation is additively modified:
 
-$$\mathbf{f}'_j = f_j + \alpha, \quad \mathbf{f}'_k = f_k \; \text{for} \; k \neq j$$
+$$
+\mathbf{f}'_j = f_j + \alpha, \quad \mathbf{f}'_k = f_k \; \text{for} \; k \neq j
+$$
 
 The steered feature representation is then decoded back to residual stream space:
 
-$$\hat{\mathbf{h}}_{\text{steered}} = \mathbf{f}' \mathbf{W}_{\text{dec}} + \mathbf{b}_{\text{dec}}$$
+$$
+\hat{\mathbf{h}}_{\text{steered}} = \mathbf{f}' \mathbf{W}_{\text{dec}} + \mathbf{b}_{\text{dec}}
+$$
 
 The intervention induces a delta in the residual stream space:
 
-$$\Delta\mathbf{h} = \left(\hat{\mathbf{h}}_{\text{steered}} - \hat{\mathbf{h}}_{\text{baseline}}\right) \cdot \boldsymbol{\sigma}$$
+$$
+\Delta\mathbf{h} = \left(\hat{\mathbf{h}}_{\text{steered}} - \hat{\mathbf{h}}_{\text{baseline}}\right) \cdot \boldsymbol{\sigma}
+$$
 
 where the multiplication by $\boldsymbol{\sigma}$ re-scales the delta from the normalized coordinate frame back to the original residual stream coordinate frame. The modified residual stream vector is:
 
-$$\mathbf{h}_{\text{final}} = \mathbf{h} + \Delta\mathbf{h}$$
+$$
+\mathbf{h}_{\text{final}} = \mathbf{h} + \Delta\mathbf{h}
+$$
 
 This additive delta formulation has a principled interpretation: the intervention modifies the residual stream by injecting or suppressing the information associated with feature $j$, without altering the baseline information encoded by all other features. The decoder direction $\mathbf{w}_j^{\text{dec}}$ determines the precise direction in residual stream space along which the delta is applied, scaled by the magnitude $\alpha \cdot \|\Delta\mathbf{h}/\alpha\|$.
 
 The modified residual stream $\mathbf{h}_{\text{final}}$ is then passed through the policy and value heads to compute the steered behavioral outputs:
 
-$$(\hat{a}_{\text{accel}}, \hat{a}_{\text{steer}}) = \pi(\mathbf{h}_{\text{final}})$$
-$$\hat{v}_{\text{steered}} = V(\mathbf{h}_{\text{final}})$$
+$$
+(\hat{a}_{\text{accel}}, \hat{a}_{\text{steer}}) = \pi(\mathbf{h}_{\text{final}})
+$$
+
+$$
+\hat{v}_{\text{steered}} = V(\mathbf{h}_{\text{final}})
+$$
 
 The behavioral effect of the intervention is quantified as the shift from baseline:
 
-$$\Delta a_{\text{accel}} = \hat{a}_{\text{accel}}(\mathbf{h}_{\text{final}}) - \hat{a}_{\text{accel}}(\mathbf{h})$$
-$$\Delta a_{\text{steer}} = \hat{a}_{\text{steer}}(\mathbf{h}_{\text{final}}) - \hat{a}_{\text{steer}}(\mathbf{h})$$
-$$\Delta v = \hat{v}(\mathbf{h}_{\text{final}}) - \hat{v}(\mathbf{h})$$
+$$
+\Delta a_{\text{accel}} = \hat{a}_{\text{accel}}(\mathbf{h}_{\text{final}}) - \hat{a}_{\text{accel}}(\mathbf{h})
+$$
+
+$$
+\Delta a_{\text{steer}} = \hat{a}_{\text{steer}}(\mathbf{h}_{\text{final}}) - \hat{a}_{\text{steer}}(\mathbf{h})
+$$
+
+$$
+\Delta v = \hat{v}(\mathbf{h}_{\text{final}}) - \hat{v}(\mathbf{h})
+$$
 
 #### 3.4.3 Causal Validity and Intervention Strength
 
@@ -453,21 +528,19 @@ The steering experiment is conducted across a calibrated range of intervention i
 
 **Sign consistency**: A genuine causal feature should produce consistent sign of $\Delta v$ across scenarios for the same $\alpha$. The *sign flip fraction*, defined as:
 
-$$\text{SFF}(\alpha) = \frac{\min\!\left(|\{i : \Delta v_i > 0\}|, |\{i : \Delta v_i < 0\}|\right)}{N_{\text{scenarios}}}$$
+$$
+\text{SFF}(\alpha) = \frac{\min\!\left(|\{i : \Delta v_i > 0\}|, |\{i : \Delta v_i < 0\}|\right)}{N_{\text{scenarios}}}
+$$
 
 quantifies the degree of disagreement across scenarios. A feature with low SFF and high mean $|\Delta v|$ is a strong causal candidate; a feature with high SFF may encode a concept whose causal role reverses depending on the scenario context.
 
 **Intervention norm consistency**: The $\ell_2$ norm of the residual stream delta $\|\Delta\mathbf{h}\|_2 = |\alpha| \cdot \|\mathbf{w}_j^{\text{dec}}\|_2 \cdot \|\boldsymbol{\sigma}\|_2$ should be non-zero and scale proportionally to $|\alpha|$. A zero delta norm would indicate that the decoder direction $\mathbf{w}_j^{\text{dec}}$ lies in the null space of the effective intervention, which would be a pathological failure of the steering protocol.
 
-#### 3.4.5 Single-Step vs. Closed-Loop Intervention
+#### 3.4.5 Closed-Loop Rollout Intervention
 
-Two distinct intervention modalities are employed, addressing complementary aspects of causal interpretability.
+The causal intervention modality employed throughout this study is the closed-loop rollout: the feature modification is sustained across the entire episode, with the modified action executed in the simulated environment at every timestep and the resulting state transition feeding the next observation. This design evaluates how the causal influence of a single feature *compounds through time*, producing qualitatively different episode-level outcomes compared to the unperturbed baseline.
 
-**Single-step intervention** evaluates the immediate behavioral response to feature steering at a single observation, without propagating the modified action through the environment. This modality isolates the direct causal effect of the feature on the policy and value heads, free from the confounds introduced by environmental state transition. The distributions of $\Delta v$, $\Delta a_{\text{accel}}$, and $\Delta a_{\text{steer}}$ are computed across a population of independently drawn scenarios, yielding robust estimates of the central tendency and variance of the behavioral effect.
-
-**Closed-loop rollout intervention** sustains the feature intervention across the entire episode: at every timestep, the feature activation is modified by $\alpha$ before the policy head computes the action, the modified action is executed in the simulated environment, and the resulting state transition becomes the input for the next timestep's forward pass. This modality evaluates how the causal influence of a single feature *compounds through time*, and whether the sustained perturbation produces qualitatively different episode-level outcomes compared to the unperturbed baseline.
-
-The closed-loop modality is scientifically the more demanding of the two. Because the environment state diverges from the baseline trajectory after the first modified action, the causal effect of the intervention at timestep $t$ cannot be cleanly separated from the environmental consequences of modified actions at timesteps $0, 1, \ldots, t-1$. The measured difference in episode-level metrics (time-to-collision, collision rate, comfort, progress ratio) therefore reflects the *total causal effect* of sustained feature modification — an integral of direct and indirect effects — rather than the direct effect alone.
+Because the environment state diverges from the baseline trajectory after the first modified action, the causal effect of the intervention at timestep $t$ cannot be cleanly separated from the environmental consequences of modified actions at timesteps $0, 1, \ldots, t-1$. The measured difference in episode-level metrics therefore reflects the *total causal effect* of sustained feature modification — an integral of direct and indirect effects propagating through the closed-loop dynamics — rather than the direct effect of a single isolated perturbation. This is a deliberate methodological choice: the compound causal effect is the quantity of practical relevance for safety-critical autonomous driving, where any persistent internal bias in the policy would similarly propagate and amplify over a full trajectory.
 
 #### 3.4.6 Paired Rollout Comparison and Metric Suite
 
@@ -555,7 +628,174 @@ A longer-term direction is the integration of mechanistic interpretability with 
 
 ---
 
-## Summary
+## 5. Experimental Methodology
+
+This section documents the concrete experimental instantiation of the four-stage interpretability pipeline described in Section 3. It specifies the dataset, architecture configuration, hyperparameter search strategy, and intervention protocol. Where a specific hyperparameter value was selected via the tuning procedure described in Section 5.3, the selected value is marked **INSET(parameter\_name)** where the final value is not reported here.
+
+---
+
+### 5.1 Environment and Dataset
+
+#### 5.1.1 Policy Architecture and Training Context
+
+The target policy is a Wayformer-based encoder trained via proximal policy optimization (PPO) on the Waymo Open Motion Dataset (WOMD). The Wayformer encoder processes a vectorized representation of the driving scene — encoding ego-vehicle kinematics, surrounding agent states, and road topology as sets of polyline tokens — and produces a fixed-dimensional latent encoding that feeds the policy and value heads. The residual stream bottleneck, i.e., the final encoder output, has dimensionality $D = 128$.
+
+The policy head and value head are multi-layer perceptrons applied directly to this $D$-dimensional bottleneck. All interpretability analyses are conducted at this bottleneck layer, which integrates all scene-level information prior to action generation. This choice is motivated by the observation that the final encoder output is the unique representational locus through which all information causally relevant to the policy's decision must pass.
+
+#### 5.1.2 Waymo Open Motion Dataset
+
+Representation harvesting is conducted on the Waymo Open Motion Dataset (WOMD), a large-scale real-world driving dataset comprising diverse traffic scenarios recorded across urban and suburban environments at 10 Hz. WOMD provides ground-truth trajectory data for all agents in the scene, including the self-driving car (SDC), surrounding vehicles, cyclists, and pedestrians.
+
+The harvesting corpus covers **10,000 WOMD scenarios**, each comprising up to **80 timesteps** (corresponding to 8 seconds of simulated driving at $\Delta t = 0.1\,\text{s}$ per step). Not all scenarios reach the maximum episode length, as episodes terminate upon scenario completion or policy failure. After filtering to valid timesteps only (excluding post-termination padding), the harvested dataset contains **790,936 activation rows**, each a $D = 128$-dimensional residual stream vector co-registered with a rich telemetry vector.
+
+| Dataset property | Value |
+|---|---|
+| Source dataset | Waymo Open Motion Dataset (WOMD) |
+| Number of scenarios | 10,000 |
+| Sampling frequency | 10 Hz ($\Delta t = 0.1\,\text{s}$) |
+| Maximum episode length | 80 timesteps (8 s) |
+| Total harvested rows | 790,936 |
+| Residual stream dimension $D$ | 128 |
+| Scalar telemetry fields | 8 |
+| Boolean event fields | 5 |
+| Per-agent array fields | 6 |
+
+#### 5.1.3 Telemetry Coverage and Scenario Diversity
+
+The 10,000-scenario corpus spans a range of traffic densities, road topologies, and behavioral regimes including highway merges, urban intersections, roundabouts, and straight road segments. The TTC-critical event rate (fraction of timesteps where $\text{TTC}_{\min} < 1.5\,\text{s}$) and the hard-braking event rate provide indirect indicators of safety-critical scenario coverage within the corpus. The deliberate exclusion of ego position coordinates (discussed in Section 3.1.3) ensures that the harvested telemetry reflects behavioral concepts rather than geographical artifacts of specific map locations.
+
+---
+
+### 5.2 Sparse Autoencoder Configuration
+
+The SAE is configured according to the architectural and training hyperparameters below. Values determined by the hyperparameter search are shown with their search grid; the selected value after tuning is denoted INSET.
+
+#### 5.2.1 Architecture
+
+| Parameter | Symbol | Value |
+|---|---|---|
+| Residual stream dimension | $D$ | 128 |
+| Expansion factor (searched) | $\gamma$ | **INSET(sae\_expansion\_factor)** $\in \{1,\ 4,\ 16\}$ |
+| Latent dimension | $F = \gamma D$ | **INSET(sae\_latent\_dim)** |
+| Encoder activation | — | ReLU |
+| Decoder row constraint | $\|\mathbf{w}_j^{\text{dec}}\|_2$ | 1 (unit norm, projected after every step) |
+| Pre-encoder bias | $\mathbf{b}_{\text{pre}}$ | Learned, initialized to $\mathbf{0}$ |
+
+#### 5.2.2 Training
+
+| Parameter | Symbol | Value |
+|---|---|---|
+| Sparsity coefficient (searched) | $\lambda$ | **INSET(sae\_l1\_coeff)** $\in \{0.02,\ 0.05,\ 0.07\}$ |
+| Learning rate (searched) | $\eta_0$ | **INSET(sae\_learning\_rate)** $\in \{3\times10^{-4},\ 10^{-3}\}$ |
+| LR schedule | — | Cosine annealing to 0 over $T$ epochs |
+| Training epochs (searched) | $T$ | **INSET(sae\_epochs)** $\in \{50\}$ |
+| Batch size | — | 4,096 |
+| Optimizer | — | Adam ($\beta_1=0.9$, $\beta_2=0.999$, $\epsilon=10^{-8}$) |
+| Gradient clip (max $\ell_2$ norm) | — | 1.0 |
+| Decoder normalization | — | Projected gradient after every optimizer step |
+
+#### 5.2.3 Activation Normalization
+
+All harvested activations are whitened prior to SAE training using empirical per-dimension statistics computed over the full 790,936-row corpus:
+
+$$\tilde{\mathbf{x}}_i = \frac{\mathbf{x}_i - \boldsymbol{\mu}}{\boldsymbol{\sigma} + \epsilon}, \quad \epsilon = 10^{-8}$$
+
+The normalization statistics $(\boldsymbol{\mu}, \boldsymbol{\sigma}) \in \mathbb{R}^D \times \mathbb{R}^D$ are stored in the model checkpoint and applied identically during annotation and steering, ensuring that the encoding and decoding operations are consistent across all pipeline stages.
+
+#### 5.2.4 Dead-Feature Monitoring Sample
+
+A fixed reference sample of up to 8,192 activation vectors (drawn from the training corpus) is reserved exclusively for dead-feature percentage monitoring. This sample is held constant across all epochs and configurations, enabling fair cross-configuration comparison of dead feature prevalence.
+
+---
+
+### 5.3 Hyperparameter Selection Strategy
+
+#### 5.3.1 Search Space and Grid Size
+
+The SAE hyperparameters are selected via exhaustive grid search over the Cartesian product of the following axes, as defined in the pipeline configuration:
+
+| Parameter | Symbol | Grid |
+|---|---|---|
+| Sparsity coefficient | $\lambda$ | $\{0.02,\ 0.05,\ 0.07\}$ |
+| Expansion factor | $\gamma$ | $\{1,\ 4,\ 16\}$ |
+| Training epochs | $T$ | $\{50\}$ |
+| Learning rate | $\eta_0$ | $\{3\times10^{-4},\ 10^{-3}\}$ |
+
+The total search space contains $3 \times 3 \times 1 \times 2 = 18$ distinct configurations. Each is trained independently from scratch using the full activation corpus and identical normalization statistics, ensuring that differences in the resulting checkpoints reflect only the hyperparameter variation.
+
+#### 5.3.2 Primary Selection Criterion
+
+The best configuration is selected by the **combined training loss** at the optimal epoch checkpoint:
+
+$$\mathcal{L}^* = \min_t \left[ \mathcal{L}_{\text{recon}}(t) + \lambda\,\Omega(\mathbf{f}(t)) \right]$$
+
+where $\mathcal{L}_{\text{recon}}(t)$ and $\Omega(\mathbf{f}(t))$ are the epoch-averaged reconstruction and sparsity terms, respectively. The checkpoint minimizing $\mathcal{L}^*$ is saved for each configuration.
+
+#### 5.3.3 Secondary Ranking Criteria
+
+Among configurations with near-equivalent $\mathcal{L}^*$, secondary ranking is applied in the following order:
+
+1. **Dead feature percentage**: lower is preferred, as configurations with excessive dead features waste representational capacity and reduce the effective SAE latent dimensionality.
+2. **$L_0$ sparsity**: the selected configuration should achieve $L_0 \ll F$, confirming that the learned representation is genuinely sparse rather than near-dense. Configurations achieving $L_0 > F/4$ (more than 25% of features active per observation) are considered insufficiently sparse regardless of combined loss.
+
+Reconstruction loss alone is not used as a selection criterion, because a configuration with $\lambda \to 0$ trivially minimizes reconstruction at the cost of dense, uninterpretable features.
+
+---
+
+### 5.5 Causal Intervention Configuration
+
+#### 5.5.1 Steering Temperature Schedule
+
+Causal interventions are evaluated across the following bidirectional temperature schedule:
+
+$$\alpha \in \{-5.0,\ -2.0,\ -1.0,\ +1.0,\ +2.0,\ +5.0\}$$
+
+This schedule spans feature suppression ($\alpha < 0$), mild perturbation ($|\alpha| = 1$), and strong amplification ($|\alpha| = 5$). The bidirectional design enables monotonicity testing and sign-flip analysis as described in Section 3.4.4. For the closed-loop setting, all temperature levels are evaluated in a single compiled pass using vectorized map operations over the $\alpha$ axis, avoiding repeated host–device synchronization.
+
+#### 5.5.2 Single-Step Intervention Protocol
+
+Single-step causal steering evaluates the immediate behavioral response to a feature modification at a single initial observation, without rolling out the modified action through the environment. Steering is conducted across **INSET(n\_scenarios\_single\_step)** independently drawn WOMD scenarios. For each scenario and temperature level, the behavioral shift is measured as:
+
+$$\Delta a_{\text{accel}},\quad \Delta a_{\text{steer}},\quad \Delta v$$
+
+relative to the unperturbed baseline. Aggregation across scenarios yields the distribution statistics $\{\mu,\,\sigma,\,\text{median},\,p_5,\,p_{95},\,\text{SFF}\}$ for each temperature level and each behavioral dimension.
+
+#### 5.5.3 Closed-Loop Rollout Protocol
+
+Closed-loop rollout steering sustains the feature modification at every timestep throughout the episode. Rollouts are conducted across **INSET(n\_scenarios\_rollout)** WOMD scenarios, with a maximum episode length of **80 timesteps**. For each scenario, one baseline and one steered rollout per temperature level are initialized from identical initial states. The steered rollout does not reset the environment between timesteps; state divergence from the baseline trajectory is expected and constitutes the causal signal of interest.
+
+The behavioral effect is quantified over the following episode-level metric suite:
+
+| Metric | Aggregation rule |
+|---|---|
+| At-fault collision | Max over episode (binary: any collision = 1) |
+| Time-to-collision (TTC) | Mean over valid agent-pairs per episode |
+| Comfort (jerk) | Mean longitudinal/lateral jerk per episode |
+| Speed limit violation | Mean fraction of timesteps in violation |
+| On multiple lanes | Mean fraction of timesteps multi-lane |
+| Driving direction compliance | Mean fraction of timesteps compliant |
+| Progress ratio | Final route completion fraction at termination |
+
+The delta metric $\Delta m = m_{\text{steered}} - m_{\text{baseline}}$ is computed for each metric $m$, scenario, and temperature. Cross-scenario aggregation yields the full distribution of $\Delta m$ per temperature, reported as $\{\mu,\,\sigma,\,\text{median},\,p_5,\,p_{95},\,\text{SFF}\}$.
+
+#### 5.5.4 Safety Thresholds
+
+The following telemetry thresholds, fixed across all pipeline stages, define safety-critical event classification:
+
+| Threshold | Symbol | Value |
+|---|---|---|
+| TTC critical threshold | $\tau_{\text{crit}}$ | $1.5\,\text{s}$ |
+| Hard braking deceleration | $a_{\text{brake}}$ | $0.4\,g = 3.924\,\text{m/s}^2$ |
+| Per-step hard braking threshold | $\Delta v_{\text{brake}} = a_{\text{brake}}\,\Delta t$ | $0.3924\,\text{m/s}$ |
+| Lead vehicle following distance | $d_{\text{follow}}$ | $30\,\text{m}$ |
+| Ahead classification boundary | $x_{\text{local}}$ | $> 2.0\,\text{m}$ |
+| Left/right classification boundary | $|y_{\text{local}}|$ | $> 1.0\,\text{m}$ |
+
+These thresholds are grounded in established automotive safety conventions: $1.5\,\text{s}$ TTC is a widely used surrogate for imminent collision risk; $0.4g$ deceleration corresponds to firm but non-emergency braking consistent with ISO 2631 comfort standards for passenger vehicles.
+
+---
+
+## Chapter Summary
 
 This chapter has developed a four-stage mechanistic interpretability framework for transformer-based autonomous driving policies, grounded in the theoretical principles of sparse coding, superposition, and causal representation analysis. The framework moves systematically from passive harvesting of latent activations, through unsupervised sparse feature decomposition, through statistical semantic annotation, to causal intervention and behavioral measurement. Each stage is designed to advance the interpretability analysis from correlational description toward mechanistic, intervention-based understanding.
 

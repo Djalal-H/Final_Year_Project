@@ -274,7 +274,12 @@ class ActivationHarvester(OfflineExtractor):
         y_v  = y[:, :n_v]
         vx_v = vx[:, :n_v]
         vy_v = vy[:, :n_v]
-        valid_v = valid_agents[:, :n_v]  # [T, n_v]
+        valid_v = valid_agents[:, :n_v].copy()  # [T, n_v]
+        # Exclude the ego vehicle from all agent-level statistics.
+        # sdc_idx is always valid and always at distance 0 from itself,
+        # which would make it win every .min() call (e.g. min_dist = 0).
+        if sdc_idx < n_v:
+            valid_v[:, sdc_idx] = False
 
         dx = x_v - ego_x[:, None]       # [T, n_v]
         dy = y_v - ego_y[:, None]
@@ -310,7 +315,7 @@ class ActivationHarvester(OfflineExtractor):
         min_ttc = ttc_valid.min(axis=1)              # [T]
 
         dist_valid = np.where(valid_v, dist, np.full_like(dist, 999.0))
-        min_dist = dist_valid.min(axis=1)            # [T]
+        min_dist = dist_valid.min(axis=1)  # [T]  — ego excluded via valid_v
 
         # ---- Boolean events -------------------------------------------
         is_ttc_critical = min_ttc < self.sae_cfg.ttc_critical_threshold  # [T]

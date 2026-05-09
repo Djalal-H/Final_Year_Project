@@ -56,7 +56,10 @@ _SCALAR_TEL_KEYS = [
     'ego_lat_accel',
     'ego_yaw_rate',
     'min_ttc',
-    'min_agent_dist',
+    # NOTE: 'min_agent_dist' intentionally excluded — this scalar was harvested
+    # as all-zeros because the ego vehicle slot is included in the raw distance
+    # array at distance 0 and the harvester did not exclude it.  The corrected
+    # measure is 'agent_dists_min' computed below with proper ego-exclusion.
     'n_valid_agents',
     'lead_vehicle_dist',
     'lead_vehicle_closing_speed',
@@ -150,8 +153,15 @@ def _load_telemetry(hf: h5py.File) -> Dict[str, np.ndarray]:
                     result, nan=0.0).astype(np.float32)
 
             if 'min' in stats:
-                # Replace invalid slots with large sentinel so they never win
-                masked_min = np.where(agent_valid, arr,
+                # Replace invalid slots with large sentinel so they never win.
+                # For distance arrays, also exclude near-zero entries (< 0.5 m)
+                # which correspond to the ego vehicle itself — it is present in
+                # the agent array at index sdc_idx with distance == 0, marked
+                # valid, so we must filter it out explicitly.
+                valid_for_min = agent_valid.copy()
+                if k == 'agent_dists':
+                    valid_for_min = valid_for_min & (arr >= 0.5)
+                masked_min = np.where(valid_for_min, arr,
                                       np.full_like(arr, 999.0))
                 tel[f'{k}_min'] = masked_min.min(axis=1).astype(np.float32)
 
