@@ -77,7 +77,18 @@ _AGENT_KEYS_TO_SUMMARIZE = [
 
 
 def _load_telemetry(hf: h5py.File) -> Dict[str, np.ndarray]:
-    """Load and flatten telemetry from an open HDF5 file."""
+    """Load and flatten telemetry from an open HDF5 file.
+
+    Per-agent reductions (mean / min / max) are computed only over **valid**
+    agent slots.  Without masking, invalid slots are zero-filled by the
+    simulator which causes e.g. ``agent_dists_min`` to always be 0.0 —
+    a constant field that Spearman cannot use.
+
+    Fallback sentinels when no valid agents exist at a timestep:
+      - min  → 999.0  (treat as "no nearby agent")
+      - mean → 0.0
+      - max  → 0.0
+    """
     tel: Dict[str, np.ndarray] = {}
 
     for k in _SCALAR_TEL_KEYS:
@@ -91,17 +102,48 @@ def _load_telemetry(hf: h5py.File) -> Dict[str, np.ndarray]:
             # float for z-score arithmetic
             tel[k] = hf[path][:].astype(np.float32)
 
+    # Load agent validity mask once — shape [N, n_agents], bool.
+    # Used to mask out zero-filled invalid slots before reduction.
+    agent_valid: Optional[np.ndarray] = None
+    if 'telemetry/agent_valid' in hf:
+        agent_valid = hf['telemetry/agent_valid'][:].astype(bool)
+
     for k, stats in _AGENT_KEYS_TO_SUMMARIZE:
         path = f'telemetry/{k}'
         if path not in hf:
             continue
         arr = hf[path][:]  # [N, n_agents]
-        if 'mean' in stats:
-            tel[f'{k}_mean'] = arr.mean(axis=1)
-        if 'min' in stats:
-            tel[f'{k}_min'] = arr.min(axis=1)
-        if 'max' in stats:
-            tel[f'{k}_max'] = arr.max(axis=1)
+
+        if agent_valid is not None:
+            if 'mean' in stats:
+                # nanmean over valid slots; NaN where no valid agent → 0.0
+                masked_mean = np.where(agent_valid, arr, np.nan)
+                result = np.nanmean(masked_mean, axis=1)
+                tel[f'{k}_mean'] = np.nan_to_num(
+                    result, nan=0.0).astype(np.float32)
+
+            if 'min' in stats:
+                # Replace invalid slots with large sentinel so they never win
+                masked_min = np.where(agent_valid, arr,
+                                      np.full_like(arr, 999.0))
+                tel[f'{k}_min'] = masked_min.min(axis=1).astype(np.float32)
+
+            if 'max' in stats:
+                # Replace invalid slots with -inf so they never win
+                masked_max = np.where(agent_valid, arr,
+                                      np.full_like(arr, -np.inf))
+                result = masked_max.max(axis=1)
+                tel[f'{k}_max'] = np.nan_to_num(
+                    result, neginf=0.0).astype(np.float32)
+        else:
+            # No validity mask available — fall back to unmasked reductions
+            # (legacy behaviour; will warn if fields are constant)
+            if 'mean' in stats:
+                tel[f'{k}_mean'] = arr.mean(axis=1)
+            if 'min' in stats:
+                tel[f'{k}_min'] = arr.min(axis=1)
+            if 'max' in stats:
+                tel[f'{k}_max'] = arr.max(axis=1)
 
     return tel
 
