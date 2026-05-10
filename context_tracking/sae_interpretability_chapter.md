@@ -522,7 +522,7 @@ The causal interpretability of the steering experiment rests on several assumpti
 
 #### 3.4.4 Temperature Schedule and Monotonicity Analysis
 
-The steering experiment is conducted across a calibrated range of intervention intensities (temperatures) $\alpha \in \{\alpha_1, \ldots, \alpha_K\}$, typically spanning negative and positive values of increasing magnitude, such as $\{-10, -5, 5, 10\}$. This bidirectional temperature schedule enables several important analyses:
+The steering experiment is conducted across a calibrated range of intervention intensities (temperatures) $\alpha \in \{\alpha_1, \ldots, \alpha_K\}$, typically spanning negative and positive values of increasing magnitude, such as $\{-5, -2, -1, +1, +2, +5\}$. This bidirectional temperature schedule enables several important analyses:
 
 **Monotonicity testing**: A feature that genuinely encodes a causal concept should produce behavioral effects that scale monotonically with $\alpha$. A feature encoding high ego speed, for instance, should produce increasing positive $\Delta a_{\text{accel}}$ as $\alpha$ increases from large negative to large positive values, reflecting the policy's tendency to decelerate when it perceives low speed and accelerate when it perceives high speed.
 
@@ -630,7 +630,7 @@ A longer-term direction is the integration of mechanistic interpretability with 
 
 ## 5. Experimental Methodology
 
-This section documents the concrete experimental instantiation of the four-stage interpretability pipeline described in Section 3. It specifies the dataset, architecture configuration, hyperparameter search strategy, and intervention protocol. Where a specific hyperparameter value was selected via the tuning procedure described in Section 5.3, the selected value is reported in bold.
+This section documents the concrete experimental instantiation of the four-stage interpretability pipeline described in Section 3. It specifies the dataset, architecture configuration, hyperparameter search strategy, and intervention protocol. Where a specific hyperparameter value was selected via the tuning procedure described in Section 5.3, the selected value is marked **INSET(parameter\_name)** where the final value is not reported here.
 
 ---
 
@@ -648,17 +648,17 @@ Representation harvesting is conducted on the Waymo Open Motion Dataset (WOMD), 
 
 The harvesting corpus covers **10,000 WOMD scenarios**, each comprising up to **80 timesteps** (corresponding to 8 seconds of simulated driving at $\Delta t = 0.1\,\text{s}$ per step). Not all scenarios reach the maximum episode length, as episodes terminate upon scenario completion or policy failure. After filtering to valid timesteps only (excluding post-termination padding), the harvested dataset contains **790,936 activation rows**, each a $D = 128$-dimensional residual stream vector co-registered with a rich telemetry vector.
 
-| Dataset property               | Value                                |
-| ------------------------------ | ------------------------------------ |
-| Source dataset                 | Waymo Open Motion Dataset (WOMD)     |
-| Number of scenarios            | 10,000                               |
-| Sampling frequency             | 10 Hz ($\Delta t = 0.1\,\text{s}$) |
-| Maximum episode length         | 80 timesteps (8 s)                   |
-| Total harvested rows           | 790,936                              |
-| Residual stream dimension$D$ | 128                                  |
-| Scalar telemetry fields        | 8                                    |
-| Boolean event fields           | 5                                    |
-| Per-agent array fields         | 6                                    |
+| Dataset property | Value |
+|---|---|
+| Source dataset | Waymo Open Motion Dataset (WOMD) |
+| Number of scenarios | 10,000 |
+| Sampling frequency | 10 Hz ($\Delta t = 0.1\,\text{s}$) |
+| Maximum episode length | 80 timesteps (8 s) |
+| Total harvested rows | 790,936 |
+| Residual stream dimension $D$ | 128 |
+| Scalar telemetry fields | 8 |
+| Boolean event fields | 5 |
+| Per-agent array fields | 6 |
 
 #### 5.1.3 Telemetry Coverage and Scenario Diversity
 
@@ -668,39 +668,37 @@ The 10,000-scenario corpus spans a range of traffic densities, road topologies, 
 
 ### 5.2 Sparse Autoencoder Configuration
 
-The SAE is configured according to the architectural and training hyperparameters below. Values determined by the hyperparameter search are shown with their search grid; the selected value after tuning is denoted in bold.
+The SAE is configured according to the architectural and training hyperparameters below. Values determined by the hyperparameter search are shown with their search grid; the selected value after tuning is denoted INSET.
 
 #### 5.2.1 Architecture
 
-| Parameter                   | Symbol                              | Value                                     |
-| --------------------------- | ----------------------------------- | ----------------------------------------- |
-| Residual stream dimension   | $D$                               | 128                                       |
-| Expansion factor (searched) | $\gamma$                          | **16** $\in \{1,\ 4,\ 16\}$       |
-| Latent dimension            | $F = \gamma D$                    | **2048**                            |
-| Encoder activation          | —                                  | ReLU                                      |
-| Decoder row constraint      | $\|\mathbf{w}_j^{\text{dec}}\|_2$ | 1 (unit norm, projected after every step) |
-| Pre-encoder bias            | $\mathbf{b}_{\text{pre}}$         | Learned, initialized to$\mathbf{0}$     |
+| Parameter | Symbol | Value |
+|---|---|---|
+| Residual stream dimension | $D$ | 128 |
+| Expansion factor (searched) | $\gamma$ | **INSET(sae\_expansion\_factor)** $\in \{1,\ 4,\ 16\}$ |
+| Latent dimension | $F = \gamma D$ | **INSET(sae\_latent\_dim)** |
+| Encoder activation | — | ReLU |
+| Decoder row constraint | $\|\mathbf{w}_j^{\text{dec}}\|_2$ | 1 (unit norm, projected after every step) |
+| Pre-encoder bias | $\mathbf{b}_{\text{pre}}$ | Learned, initialized to $\mathbf{0}$ |
 
 #### 5.2.2 Training
 
-| Parameter                          | Symbol      | Value                                                           |
-| ---------------------------------- | ----------- | --------------------------------------------------------------- |
-| Sparsity coefficient (searched)    | $\lambda$ | **0.02** $\in \{0.02,\ 0.05,\ 0.07\}$                   |
-| Learning rate (searched)           | $\eta_0$  | **$10^{-3}$** $\in \{3\times10^{-4},\ 10^{-3}\}$      |
-| LR schedule                        | —          | Cosine annealing to 0 over$T$ epochs                          |
-| Training epochs (searched)         | $T$       | **50** $\in \{50\}$ (best checkpoint: epoch 40)         |
-| Batch size                         | —          | 4,096                                                           |
-| Optimizer                          | —          | Adam ($\beta_1=0.9$, $\beta_2=0.999$, $\epsilon=10^{-8}$) |
-| Gradient clip (max$\ell_2$ norm) | —          | 1.0                                                             |
-| Decoder normalization              | —          | Projected gradient after every optimizer step                   |
+| Parameter | Symbol | Value |
+|---|---|---|
+| Sparsity coefficient (searched) | $\lambda$ | **INSET(sae\_l1\_coeff)** $\in \{0.02,\ 0.05,\ 0.07\}$ |
+| Learning rate (searched) | $\eta_0$ | **INSET(sae\_learning\_rate)** $\in \{3\times10^{-4},\ 10^{-3}\}$ |
+| LR schedule | — | Cosine annealing to 0 over $T$ epochs |
+| Training epochs (searched) | $T$ | **INSET(sae\_epochs)** $\in \{50\}$ |
+| Batch size | — | 4,096 |
+| Optimizer | — | Adam ($\beta_1=0.9$, $\beta_2=0.999$, $\epsilon=10^{-8}$) |
+| Gradient clip (max $\ell_2$ norm) | — | 1.0 |
+| Decoder normalization | — | Projected gradient after every optimizer step |
 
 #### 5.2.3 Activation Normalization
 
 All harvested activations are whitened prior to SAE training using empirical per-dimension statistics computed over the full 790,936-row corpus:
 
-$$
-\tilde{\mathbf{x}}_i = \frac{\mathbf{x}_i - \boldsymbol{\mu}}{\boldsymbol{\sigma} + \epsilon}, \quad \epsilon = 10^{-8}
-$$
+$$\tilde{\mathbf{x}}_i = \frac{\mathbf{x}_i - \boldsymbol{\mu}}{\boldsymbol{\sigma} + \epsilon}, \quad \epsilon = 10^{-8}$$
 
 The normalization statistics $(\boldsymbol{\mu}, \boldsymbol{\sigma}) \in \mathbb{R}^D \times \mathbb{R}^D$ are stored in the model checkpoint and applied identically during annotation and steering, ensuring that the encoding and decoding operations are consistent across all pipeline stages.
 
@@ -716,22 +714,20 @@ A fixed reference sample of up to 8,192 activation vectors (drawn from the train
 
 The SAE hyperparameters are selected via exhaustive grid search over the Cartesian product of the following axes, as defined in the pipeline configuration:
 
-| Parameter            | Symbol      | Grid                             |
-| -------------------- | ----------- | -------------------------------- |
-| Sparsity coefficient | $\lambda$ | $\{0.02,\ 0.05,\ 0.07\}$       |
-| Expansion factor     | $\gamma$  | $\{1,\ 4,\ 16\}$               |
-| Training epochs      | $T$       | $\{30, 50\}$                   |
-| Learning rate        | $\eta_0$  | $\{3\times10^{-4},\ 10^{-3}\}$ |
+| Parameter | Symbol | Grid |
+|---|---|---|
+| Sparsity coefficient | $\lambda$ | $\{0.02,\ 0.05,\ 0.07\}$ |
+| Expansion factor | $\gamma$ | $\{1,\ 4,\ 16\}$ |
+| Training epochs | $T$ | $\{50\}$ |
+| Learning rate | $\eta_0$ | $\{3\times10^{-4},\ 10^{-3}\}$ |
 
-The total search space contains $3 \times 3 \times 2 = 18$ distinct configurations ($\lambda \times \gamma \times \eta_0$, with a single epoch count of 50). Each is trained independently from scratch using the full activation corpus and identical normalization statistics, ensuring that differences in the resulting checkpoints reflect only the hyperparameter variation.
+The total search space contains $3 \times 3 \times 1 \times 2 = 18$ distinct configurations. Each is trained independently from scratch using the full activation corpus and identical normalization statistics, ensuring that differences in the resulting checkpoints reflect only the hyperparameter variation.
 
 #### 5.3.2 Primary Selection Criterion
 
 The best configuration is selected by the **combined training loss** at the optimal epoch checkpoint:
 
-$$
-\mathcal{L}^* = \min_t \left[ \mathcal{L}_{\text{recon}}(t) + \lambda\,\Omega(\mathbf{f}(t)) \right]
-$$
+$$\mathcal{L}^* = \min_t \left[ \mathcal{L}_{\text{recon}}(t) + \lambda\,\Omega(\mathbf{f}(t)) \right]$$
 
 where $\mathcal{L}_{\text{recon}}(t)$ and $\Omega(\mathbf{f}(t))$ are the epoch-averaged reconstruction and sparsity terms, respectively. The checkpoint minimizing $\mathcal{L}^*$ is saved for each configuration.
 
@@ -744,25 +740,6 @@ Among configurations with near-equivalent $\mathcal{L}^*$, secondary ranking is 
 
 Reconstruction loss alone is not used as a selection criterion, because a configuration with $\lambda \to 0$ trivially minimizes reconstruction at the cost of dense, uninterpretable features.
 
-#### 5.3.4 Representative Tuning Results and Selected Configuration
-
-Table 5.1 presents four representative configurations drawn from the full 18-run grid, selected to illustrate the principal trade-offs governing model quality along the $\gamma$ and $\lambda$ axes. The full grid is omitted for conciseness; the four runs shown span the range of meaningful behavioral variation.
-
-**Table 5.1.** Representative hyperparameter configurations from the grid search. $\mathcal{L}^*$ is the combined loss at the best checkpoint; $L_0$ is the mean number of active features per observation at that checkpoint; Best Epoch is the epoch at which $\mathcal{L}^*$ was achieved. The selected configuration is highlighted in bold.
-
-| Run         | $\lambda$    | $\gamma$   | $\eta_0$           | $\mathcal{L}^*$ | $L_0$        | Best Epoch   |
-| ----------- | -------------- | ------------ | -------------------- | ----------------- | -------------- | ------------ |
-| 2           | 0.02           | 1            | $10^{-3}$          | 0.3631            | 10.2           | 22           |
-| 4           | 0.02           | 4            | $10^{-3}$          | 0.3415            | 18.3           | 30           |
-| **6** | **0.02** | **16** | $\mathbf{10^{-3}}$ | **0.3355**  | **22.5** | **40** |
-| 12          | 0.05           | 16           | $10^{-3}$          | 0.6521            | 5.6            | 34           |
-
-**Justification for Run 6.** The selected configuration ($\lambda = 0.02$, $\gamma = 16$, $\eta_0 = 10^{-3}$) achieves the lowest combined loss across all 18 runs ($\mathcal{L}^* = 0.3355$), establishing its superiority on the primary criterion. Three additional observations support this selection:
-
-1. **Expansion factor**: Runs 2, 4, and 6 share identical $\lambda$ and $\eta_0$, isolating the effect of $\gamma$. The combined loss decreases monotonically as $\gamma$ increases from 1 to 4 to 16, confirming that a larger overcomplete dictionary yields strictly better reconstruction under the same sparsity budget. The selected $\gamma = 16$ yields $F = 2048$ latent dimensions, providing sufficient representational capacity to decompose the $D = 128$ residual stream into a rich set of monosemantic candidate features.
-2. **Sparsity coefficient**: Comparing Run 6 ($\lambda = 0.02$) with Run 12 ($\lambda = 0.05$, same $\gamma$ and $\eta_0$) reveals the cost of over-aggressive sparsification: the combined loss nearly doubles (0.3355 vs. 0.6521) while $L_0$ collapses from 22.5 to 5.6. At $\lambda = 0.05$, the sparsity penalty dominates the reconstruction term, forcing the encoder into a regime where fewer than 6 features activate per observation on average — a level of sparsity that, for $F = 2048$, represents a utilization rate below 0.3% and is likely to produce severely underspecified reconstructions. The value $\lambda = 0.02$ balances reconstruction fidelity with genuine sparsity, achieving $L_0 = 22.5$, corresponding to a 1.1% activation rate ($22.5 / 2048$), well within the sparse regime.
-3. **Best checkpoint epoch**: Run 6 converges to its optimal checkpoint at epoch 40 of 50, indicating that the cosine annealing schedule achieves effective loss reduction without premature convergence or overfitting, and that training duration of 50 epochs is appropriate for this configuration.
-
 ---
 
 ### 5.5 Causal Intervention Configuration
@@ -771,42 +748,48 @@ Table 5.1 presents four representative configurations drawn from the full 18-run
 
 Causal interventions are evaluated across the following bidirectional temperature schedule:
 
-$$
-\alpha \in \{-5.0,\ -2.0,\ -1.0,\ +1.0,\ +2.0,\ +5.0\}
-$$
+$$\alpha \in \{-5.0,\ -2.0,\ -1.0,\ +1.0,\ +2.0,\ +5.0\}$$
 
 This schedule spans feature suppression ($\alpha < 0$), mild perturbation ($|\alpha| = 1$), and strong amplification ($|\alpha| = 5$). The bidirectional design enables monotonicity testing and sign-flip analysis as described in Section 3.4.4. For the closed-loop setting, all temperature levels are evaluated in a single compiled pass using vectorized map operations over the $\alpha$ axis, avoiding repeated host–device synchronization.
 
-#### 5.5.2 Closed-Loop Rollout Protocol
+#### 5.5.2 Single-Step Intervention Protocol
 
-Closed-loop rollout steering sustains the feature modification at every timestep throughout the episode. Rollouts are conducted across **50** WOMD scenarios, with a maximum episode length of **80 timesteps**. For each scenario, one baseline and one steered rollout per temperature level are initialized from identical initial states. The steered rollout does not reset the environment between timesteps; state divergence from the baseline trajectory is expected and constitutes the causal signal of interest.
+Single-step causal steering evaluates the immediate behavioral response to a feature modification at a single initial observation, without rolling out the modified action through the environment. Steering is conducted across **INSET(n\_scenarios\_single\_step)** independently drawn WOMD scenarios. For each scenario and temperature level, the behavioral shift is measured as:
+
+$$\Delta a_{\text{accel}},\quad \Delta a_{\text{steer}},\quad \Delta v$$
+
+relative to the unperturbed baseline. Aggregation across scenarios yields the distribution statistics $\{\mu,\,\sigma,\,\text{median},\,p_5,\,p_{95},\,\text{SFF}\}$ for each temperature level and each behavioral dimension.
+
+#### 5.5.3 Closed-Loop Rollout Protocol
+
+Closed-loop rollout steering sustains the feature modification at every timestep throughout the episode. Rollouts are conducted across **INSET(n\_scenarios\_rollout)** WOMD scenarios, with a maximum episode length of **80 timesteps**. For each scenario, one baseline and one steered rollout per temperature level are initialized from identical initial states. The steered rollout does not reset the environment between timesteps; state divergence from the baseline trajectory is expected and constitutes the causal signal of interest.
 
 The behavioral effect is quantified over the following episode-level metric suite:
 
-| Metric                       | Aggregation rule                               |
-| ---------------------------- | ---------------------------------------------- |
-| At-fault collision           | Max over episode (binary: any collision = 1)   |
-| Time-to-collision (TTC)      | Mean over valid agent-pairs per episode        |
-| Comfort (jerk)               | Mean longitudinal/lateral jerk per episode     |
-| Speed limit violation        | Mean fraction of timesteps in violation        |
-| On multiple lanes            | Mean fraction of timesteps multi-lane          |
-| Driving direction compliance | Mean fraction of timesteps compliant           |
-| Progress ratio               | Final route completion fraction at termination |
+| Metric | Aggregation rule |
+|---|---|
+| At-fault collision | Max over episode (binary: any collision = 1) |
+| Time-to-collision (TTC) | Mean over valid agent-pairs per episode |
+| Comfort (jerk) | Mean longitudinal/lateral jerk per episode |
+| Speed limit violation | Mean fraction of timesteps in violation |
+| On multiple lanes | Mean fraction of timesteps multi-lane |
+| Driving direction compliance | Mean fraction of timesteps compliant |
+| Progress ratio | Final route completion fraction at termination |
 
 The delta metric $\Delta m = m_{\text{steered}} - m_{\text{baseline}}$ is computed for each metric $m$, scenario, and temperature. Cross-scenario aggregation yields the full distribution of $\Delta m$ per temperature, reported as $\{\mu,\,\sigma,\,\text{median},\,p_5,\,p_{95},\,\text{SFF}\}$.
 
-#### 5.5.3 Safety Thresholds
+#### 5.5.4 Safety Thresholds
 
 The following telemetry thresholds, fixed across all pipeline stages, define safety-critical event classification:
 
-| Threshold                          | Symbol                                                         | Value                            |
-| ---------------------------------- | -------------------------------------------------------------- | -------------------------------- |
-| TTC critical threshold             | $\tau_{\text{crit}}$                                         | $1.5\,\text{s}$                |
-| Hard braking deceleration          | $a_{\text{brake}}$                                           | $0.4\,g = 3.924\,\text{m/s}^2$ |
-| Per-step hard braking threshold    | $\Delta v_{\text{brake}} = a_{\text{brake}}\,\Delta t$       | $0.3924\,\text{m/s}$           |
-| Lead vehicle following distance    | $d_{\text{follow}}$                                          | $30\,\text{m}$                 |
-| Ahead classification boundary      | $x_{\text{local}}$                                           | $> 2.0\,\text{m}$              |
-| Left/right classification boundary | $|y_{\text{local}}                                       | $ |                                  |
+| Threshold | Symbol | Value |
+|---|---|---|
+| TTC critical threshold | $\tau_{\text{crit}}$ | $1.5\,\text{s}$ |
+| Hard braking deceleration | $a_{\text{brake}}$ | $0.4\,g = 3.924\,\text{m/s}^2$ |
+| Per-step hard braking threshold | $\Delta v_{\text{brake}} = a_{\text{brake}}\,\Delta t$ | $0.3924\,\text{m/s}$ |
+| Lead vehicle following distance | $d_{\text{follow}}$ | $30\,\text{m}$ |
+| Ahead classification boundary | $x_{\text{local}}$ | $> 2.0\,\text{m}$ |
+| Left/right classification boundary | $|y_{\text{local}}|$ | $> 1.0\,\text{m}$ |
 
 These thresholds are grounded in established automotive safety conventions: $1.5\,\text{s}$ TTC is a widely used surrogate for imminent collision risk; $0.4g$ deceleration corresponds to firm but non-emergency braking consistent with ISO 2631 comfort standards for passenger vehicles.
 

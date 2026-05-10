@@ -490,7 +490,7 @@ def main():
     parser.add_argument("--sae_checkpoint", required=True)
     parser.add_argument("--feature_idx", type=int, required=True)
     parser.add_argument("--temperatures", type=float,
-                        nargs="+", default=[-10.0, -5.0, 5.0, 10.0])
+                        nargs="+", default=[-5.0, -2.0, -1.0, 1.0, 2.0, 5.0])
     parser.add_argument("--n_scenarios", type=int, default=10)
     parser.add_argument("--output", default="data/sae_interpretability/steering_results.json")
     parser.add_argument("--checkpoint", default="model_final.pkl")
