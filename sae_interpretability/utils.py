@@ -106,13 +106,10 @@ def save_figure(
 
     common_kwargs = dict(bbox_inches=bbox_inches, pad_inches=pad_inches)
 
-    png_path = out_dir / f"{stem}.png"
     pdf_path = out_dir / f"{stem}.pdf"
 
-    fig.savefig(png_path, dpi=dpi, **common_kwargs)
-    fig.savefig(pdf_path,           **common_kwargs)   # PDF is always vector
+    fig.savefig(pdf_path, **common_kwargs)   # PDF is always vector
 
-    print(f"[Figure] Saved → {png_path}")
     print(f"[Figure] Saved → {pdf_path}")
 
 

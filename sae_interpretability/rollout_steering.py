@@ -493,17 +493,6 @@ class RolloutSteerer(CausalSteerer):
                 )
 
                 for res in per_alpha:
-                    alpha = res['alpha']
-                    nb    = res['n_steps_baseline']
-                    ns    = res['n_steps_steered']
-                    dm    = res['delta_metrics']
-                    print(
-                        f"    α={alpha:+.2f}  baseline={nb}t  steered={ns}t  "
-                        + "  ".join(
-                            f"Δ{k}={v:+.3f}" for k, v in dm.items()
-                            if not np.isnan(v)
-                        )
-                    )
                     res['scenario_id'] = scen_idx
 
                 all_scenarios.append({
@@ -583,17 +572,6 @@ class RolloutSteerer(CausalSteerer):
             )
 
             for res in per_alpha:
-                alpha = res['alpha']
-                nb    = res['n_steps_baseline']
-                ns    = res['n_steps_steered']
-                dm    = res['delta_metrics']
-                print(
-                    f"    α={alpha:+.2f}  baseline={nb}t  steered={ns}t  "
-                    + "  ".join(
-                        f"Δ{k}={v:+.3f}" for k, v in dm.items()
-                        if not np.isnan(v)
-                    )
-                )
                 res['scenario_id'] = scen_idx
 
             all_scenarios.append({
@@ -790,15 +768,20 @@ def plot_rollout_metrics(
                 for mn in metric_names:
                     scen_means[mn].append(dm.get(mn, float('nan')))
 
+            n_cols = min(3, n_metrics)
+            n_rows = (n_metrics + n_cols - 1) // n_cols
             fig, axes = plt.subplots(
-                1, n_metrics,
-                figsize=(max(4, 3 * n_metrics), 4.5),
+                n_rows, n_cols,
+                figsize=(4.0 * n_cols, 4.2 * n_rows),
                 sharey=False,
                 squeeze=False,
             )
-            axes = axes[0]  # shape (n_metrics,)
+            axes_flat = axes.flatten()
+            # Remove any unused/excess axes in the grid
+            for idx in range(n_metrics, len(axes_flat)):
+                fig.delaxes(axes_flat[idx])
 
-            for ax, mn in zip(axes, metric_names):
+            for ax, mn in zip(axes_flat[:n_metrics], metric_names):
                 vals      = np.array(scen_means[mn])
                 bar_cols  = [PHD_TEAL if v >= 0 else PHD_ORANGE for v in vals]
                 x         = np.arange(n_temps)
@@ -818,25 +801,37 @@ def plot_rollout_metrics(
                 ax.spines['top'].set_visible(False)
                 ax.spines['right'].set_visible(False)
 
-            fig.suptitle(
-                f"'{label}' (f{feature_idx}) — Scenario {scen_id}: Δmetric per α",
-                fontsize=12, fontweight='bold', y=1.02,
-            )
-            plt.tight_layout()
+            if n_rows > 1:
+                fig.suptitle(
+                    f"'{label}' (f{feature_idx}) — Scenario {scen_id}: Δmetric per α",
+                    fontsize=12, fontweight='bold', y=0.98,
+                )
+                plt.tight_layout(rect=[0, 0, 1, 0.95])
+            else:
+                fig.suptitle(
+                    f"'{label}' (f{feature_idx}) — Scenario {scen_id}: Δmetric per α",
+                    fontsize=12, fontweight='bold', y=1.02,
+                )
+                plt.tight_layout()
             stem = f'scenario_{scen_id:02d}_metrics'
             save_figure(fig, scen_dir, stem)
             plt.close(fig)
 
     # ── 2. Aggregate figure (mean ± std across all scenarios) ─────────────
+    n_cols = min(3, n_metrics)
+    n_rows = (n_metrics + n_cols - 1) // n_cols
     fig, axes = plt.subplots(
-        1, n_metrics,
-        figsize=(max(5, 3.5 * n_metrics), 5),
+        n_rows, n_cols,
+        figsize=(4.5 * n_cols, 4.5 * n_rows),
         sharey=False,
         squeeze=False,
     )
-    axes = axes[0]  # shape (n_metrics,)
+    axes_flat = axes.flatten()
+    # Remove any unused/excess axes in the grid
+    for idx in range(n_metrics, len(axes_flat)):
+        fig.delaxes(axes_flat[idx])
 
-    for ax, mn in zip(axes, metric_names):
+    for ax, mn in zip(axes_flat[:n_metrics], metric_names):
         means_arr = np.array([
             summary.get(f"alpha_{a:+.2f}", {}).get('metrics', {}).get(mn, {}).get('mean', float('nan'))
             for a in temperatures
@@ -864,15 +859,26 @@ def plot_rollout_metrics(
         ax.spines['top'].set_visible(False)
         ax.spines['right'].set_visible(False)
 
-    fig.suptitle(
-        f"'{label}' (f{feature_idx}) — Aggregate Δmetric per α "
-        f"(mean ± std over scenarios)",
-        fontsize=12, fontweight='bold', y=1.02,
-    )
-    plt.tight_layout()
+    if n_rows > 1:
+        fig.suptitle(
+            f"'{label}' (f{feature_idx}) — Aggregate Δmetric per α "
+            f"(mean ± std over scenarios)",
+            fontsize=12, fontweight='bold', y=0.98,
+        )
+        plt.tight_layout(rect=[0, 0, 1, 0.95])
+    else:
+        fig.suptitle(
+            f"'{label}' (f{feature_idx}) — Aggregate Δmetric per α "
+            f"(mean ± std over scenarios)",
+            fontsize=12, fontweight='bold', y=1.02,
+        )
+        plt.tight_layout()
     agg_dir = out_dir / f'f{feature_idx}_{safe_name}'
     agg_dir.mkdir(parents=True, exist_ok=True)
-    save_figure(fig, agg_dir, 'aggregate_metrics')
+    import contextlib
+    import io
+    with contextlib.redirect_stdout(io.StringIO()):
+        save_figure(fig, agg_dir, 'aggregate_metrics')
     plt.close(fig)
     print(f"[RolloutSteerer] Metrics plots → {agg_dir}/")
 
@@ -918,50 +924,48 @@ def plot_action_trajectories(
             if temp_result is None:
                 continue
 
-            # ── 2-row × 2-col layout: (accel|steer) × (baseline|steered) ──
+            # ── 2-row × 1-col layout: Acceleration and Steering Angle comparative overlay ──
             fig, axes = plt.subplots(
-                2, 2,
-                figsize=(10, 6),
+                2, 1,
+                figsize=(8, 6.5),
                 sharex=True,
-                gridspec_kw={'hspace': 0.38, 'wspace': 0.25},
+                gridspec_kw={'hspace': 0.3},
             )
 
-            col_labels = ['Baseline', f'Steered  α={alpha:+.1f}']
-            row_labels  = ['Acceleration', 'Steering angle']
+            row_labels  = ['Acceleration', 'Steering Angle']
             dim_keys    = ['accel', 'steer']
-            col_data    = [
-                temp_result.get('per_step_baseline', {}),
-                temp_result.get('per_step_steered',  {}),
-            ]
-            col_colors  = [PHD_BLUE, PHD_ORANGE]
+            base_data   = temp_result.get('per_step_baseline', {})
+            steer_data  = temp_result.get('per_step_steered',  {})
 
             for row_idx, (dim_name, row_label) in enumerate(zip(dim_keys, row_labels)):
-                for col_idx, (data_dict, col_label, color) in enumerate(
-                    zip(col_data, col_labels, col_colors)
-                ):
-                    ax   = axes[row_idx, col_idx]
-                    vals = data_dict.get(dim_name, [])
-                    t    = np.arange(len(vals))
+                ax = axes[row_idx]
 
-                    ax.plot(t, vals, color=color, linewidth=1.8, alpha=0.92)
-                    ax.fill_between(t, 0, vals, color=color, alpha=0.12)
-                    ax.axhline(0, color='#aaa', linewidth=0.7, linestyle=':')
+                vals_base  = base_data.get(dim_name, [])
+                vals_steer = steer_data.get(dim_name, [])
 
-                    # Row labels (left column only)
-                    if col_idx == 0:
-                        ax.set_ylabel(row_label, fontsize=10)
-                    # Column headers (top row only)
-                    if row_idx == 0:
-                        ax.set_title(col_label, fontsize=10, fontweight='bold',
-                                     color=color)
-                    # X-label (bottom row only)
-                    if row_idx == 1:
-                        ax.set_xlabel('Timestep', fontsize=9)
+                t_base  = np.arange(len(vals_base))
+                t_steer = np.arange(len(vals_steer))
 
-                    ax.tick_params(labelsize=8)
-                    ax.spines['top'].set_visible(False)
-                    ax.spines['right'].set_visible(False)
-                    ax.grid(axis='y', linewidth=0.5, alpha=0.4)
+                # Plot Baseline (Teal/Blue)
+                ax.plot(t_base, vals_base, label='Baseline', color=PHD_BLUE, linewidth=1.8, alpha=0.8)
+                ax.fill_between(t_base, 0, vals_base, color=PHD_BLUE, alpha=0.06)
+
+                # Plot Steered (Orange/Red)
+                ax.plot(t_steer, vals_steer, label=f'Steered (α={alpha:+.1f})', color=PHD_ORANGE, linewidth=1.8, alpha=0.9)
+                ax.fill_between(t_steer, 0, vals_steer, color=PHD_ORANGE, alpha=0.12)
+
+                ax.axhline(0, color='#aaa', linewidth=0.7, linestyle=':')
+                ax.set_ylabel(row_label, fontsize=10, fontweight='bold')
+                ax.legend(frameon=True, facecolor='white', edgecolor='none', fontsize=8, loc='upper right')
+
+                ax.tick_params(labelsize=8)
+                ax.spines['top'].set_visible(False)
+                ax.spines['right'].set_visible(False)
+                ax.grid(axis='y', linewidth=0.5, alpha=0.4)
+
+                # X-label (bottom row only)
+                if row_idx == 1:
+                    ax.set_xlabel('Timestep', fontsize=9, fontweight='bold')
 
             fig.suptitle(
                 f"'{label}' (f{feature_idx}) — Scenario {scen_id}  α={alpha:+.1f}: "
@@ -970,10 +974,14 @@ def plot_action_trajectories(
             )
 
             stem = f'scenario_{scen_id:02d}_alpha_{alpha_str}'
-            save_figure(fig, traj_dir, stem)
+            import contextlib
+            import io
+            with contextlib.redirect_stdout(io.StringIO()):
+                save_figure(fig, traj_dir, stem)
             plt.close(fig)
 
-    print(f"[RolloutSteerer] Trajectory plots → {traj_dir}/")
+    global_dir = out_dir / f'f{feature_idx}_{safe_name}'
+    print(f"[RolloutSteerer] Trajectory plots → {global_dir}/")
 
 
 # ---------------------------------------------------------------------------

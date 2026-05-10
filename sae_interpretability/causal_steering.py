@@ -476,8 +476,8 @@ def plot_histograms(
             fontsize=12, fontweight='bold',
         )
         plt.tight_layout()
-        out_path = out_dir / f'f{feature_idx}_{metric_name}_hist.png'
-        fig.savefig(out_path, dpi=130, bbox_inches='tight')
+        out_path = out_dir / f'f{feature_idx}_{metric_name}_hist.pdf'
+        fig.savefig(out_path, bbox_inches='tight')
         plt.close(fig)
         print(f"[Steerer] Histogram → {out_path}")
 
