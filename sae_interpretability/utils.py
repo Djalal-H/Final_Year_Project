@@ -15,12 +15,14 @@ Usage::
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
-from typing import Union
+from typing import Any, Dict, List, Union
 
 import matplotlib
 import matplotlib.pyplot as plt
+import numpy as np
 
 # ---------------------------------------------------------------------------
 # PhD-level figure style defaults
@@ -118,3 +120,58 @@ def ensure_dir(path: Union[str, Path]) -> Path:
     p = Path(path)
     p.mkdir(parents=True, exist_ok=True)
     return p
+
+
+# ---------------------------------------------------------------------------
+# Data utilities
+# ---------------------------------------------------------------------------
+
+def _json_default(obj):
+    """JSON serialiser for numpy types."""
+    if isinstance(obj, (np.floating, np.float32, np.float64)):
+        return float(obj)
+    if isinstance(obj, (np.integer,)):
+        return int(obj)
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    raise TypeError(f"Object of type {type(obj)} is not JSON serializable")
+
+
+def save_incremental_results(
+    output_path: str,
+    feature_name: str,
+    feature_data: Dict[str, Any],
+    all_features_meta: Dict[str, int],
+    temperatures: List[float],
+    n_scenarios: int,
+    max_steps: int,
+) -> None:
+    """Incrementally update the JSON results file with a new feature."""
+    out_dir = Path(output_path).parent
+    out_dir.mkdir(parents=True, exist_ok=True)
+    
+    if os.path.exists(output_path):
+        try:
+            with open(output_path, 'r') as f:
+                out_data = json.load(f)
+        except json.JSONDecodeError:
+            out_data = {}
+    else:
+        out_data = {}
+
+    if 'features' not in out_data:
+        out_data['features'] = all_features_meta
+        out_data['temperatures'] = temperatures
+        out_data['n_scenarios'] = n_scenarios
+        out_data['max_steps'] = max_steps
+
+    if 'results' not in out_data:
+        out_data['results'] = {}
+
+    out_data['results'][feature_name] = feature_data
+
+    # Write to a temporary file and rename to avoid corruption if interrupted
+    tmp_path = f"{output_path}.tmp"
+    with open(tmp_path, 'w') as f:
+        json.dump(out_data, f, indent=2, default=_json_default)
+    os.replace(tmp_path, output_path)

@@ -51,6 +51,8 @@ import torch
 from sae_interpretability.utils import (
     apply_phd_style,
     save_figure,
+    save_incremental_results,
+    _json_default,
     PHD_BLUE, PHD_ORANGE, PHD_GREEN, PHD_PURPLE, PHD_GRAY, PHD_TEAL,
 )
 
@@ -516,7 +518,7 @@ class RolloutSteerer(CausalSteerer):
                 feature_name=feature_name,
             )
 
-            all_feature_results[feature_name] = {
+            feature_data = {
                 'feature_name': feature_name,
                 'feature_idx':  feature_idx,
                 'temperatures': temperatures,
@@ -525,9 +527,21 @@ class RolloutSteerer(CausalSteerer):
                 'summary':      summary,
                 'scenarios':    all_scenarios,
             }
+            all_feature_results[feature_name] = feature_data
 
-        # ── Save combined results ──────────────────────────────────────────
-        out_data = {
+            save_incremental_results(
+                output_path=output_path,
+                feature_name=feature_name,
+                feature_data=feature_data,
+                all_features_meta={name: idx for name, idx in features.items()},
+                temperatures=temperatures,
+                n_scenarios=n_scenarios,
+                max_steps=max_steps,
+            )
+            print(f"\n  [Incremental Save] Feature '{feature_name}' appended to {output_path}")
+
+        print(f"\n[RolloutSteerer] All {len(features)} features completed. Results → {output_path}")
+        return {
             'features':     {name: idx for name, idx in features.items()},
             'temperatures': temperatures,
             'n_scenarios':  n_scenarios,
@@ -535,90 +549,12 @@ class RolloutSteerer(CausalSteerer):
             'results':      all_feature_results,
         }
 
-        with open(output_path, 'w') as f:
-            json.dump(out_data, f, indent=2, default=_json_default)
-
-        print(f"\n[RolloutSteerer] Combined results → {output_path}")
-        return out_data
-        from vmax.simulator import make_data_generator, datasets
-
-        data_gen = make_data_generator(
-            path=datasets.get_dataset(self.dataset_path),
-            max_num_objects=self.config["max_num_objects"],
-            include_sdc_paths=not self.config.get("waymo_dataset", False),
-            batch_dims=(1,),
-            seed=42,
-            repeat=1,
-        )
-
-        out_dir = Path(output_path).parent
-        out_dir.mkdir(parents=True, exist_ok=True)
-
-        all_scenarios: List[Dict] = []
-        print(
-            f"\n[RolloutSteerer] Feature {feature_idx}  "
-            f"α={temperatures}  {n_scenarios} scenarios  max_steps={max_steps}\n"
-            f"  Optimizations: JIT + while_loop + fixed_buffers + vmap({len(temperatures)} temps)"
-        )
-
-        for scen_idx, scenario_batch in enumerate(data_gen):
-            if scen_idx >= n_scenarios:
-                break
-
-            print(f"\n  ── Scenario {scen_idx + 1}/{n_scenarios} ──")
-            # All temperatures run in one call (vmap, Opt 4)
-            per_alpha = self.run_paired_rollout(
-                scenario_batch, feature_idx, temperatures, max_steps
-            )
-
-            for res in per_alpha:
-                res['scenario_id'] = scen_idx
-
-            all_scenarios.append({
-                'scenario_id': scen_idx,
-                'temperatures': per_alpha,
-            })
-
-        # ── Cross-scenario summary ─────────────────────────────────────────
-        summary = _summarise_rollout_results(all_scenarios, temperatures, feature_idx)
-
-        out_data = {
-            'feature_idx':  feature_idx,
-            'temperatures': temperatures,
-            'n_scenarios':  len(all_scenarios),
-            'max_steps':    max_steps,
-            'summary':      summary,
-            'scenarios':    all_scenarios,
-        }
-
-        with open(output_path, 'w') as f:
-            json.dump(out_data, f, indent=2, default=_json_default)
-
-        print(f"\n[RolloutSteerer] Results → {output_path}")
-        _print_summary_table(summary, temperatures, all_scenarios)
-
-        # ── Plots ─────────────────────────────────────────────────────────
-        plot_rollout_metrics(summary, temperatures, feature_idx, out_dir)
-        plot_action_trajectories(all_scenarios, temperatures, feature_idx, out_dir)
-
-        return out_data
-
 
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-def _json_default(obj):
-    """JSON serialiser for numpy types."""
-    if isinstance(obj, (np.floating, np.float32, np.float64)):
-        return float(obj)
-    if isinstance(obj, (np.integer,)):
-        return int(obj)
-    if isinstance(obj, np.ndarray):
-        return obj.tolist()
-    raise TypeError(f"Object of type {type(obj)} is not JSON serializable")
 
 
 def _summarise_rollout_results(
