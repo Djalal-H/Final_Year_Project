@@ -112,7 +112,9 @@ def _evaluate_single_model(
     for result in eval_results.test_results:
         report_scores: Dict[str, float] = {}
         for metric_data in result.metrics_data:
-            report_scores[metric_data.name] = metric_data.score or 0.0
+            # DeepEval appends a suffix to the metric name, clean it up for exact matching
+            clean_name = metric_data.name.replace(" [GEval]", "").replace(" (GEval)", "")
+            report_scores[clean_name] = metric_data.score or 0.0
         per_report_scores.append(report_scores)
 
     # Calculate average response time
