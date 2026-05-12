@@ -115,6 +115,14 @@ def _evaluate_single_model(
             report_scores[metric_data.name] = metric_data.score or 0.0
         per_report_scores.append(report_scores)
 
+    # Calculate average response time
+    response_times = [
+        tc.additional_metadata.get("response_time_s", 0.0) 
+        for tc in dataset.test_cases 
+        if tc.additional_metadata and tc.additional_metadata.get("response_time_s", 0.0) > 0
+    ]
+    avg_response_time = sum(response_times) / len(response_times) if response_times else 0.0
+
     # Compute cognitive scorecard
     scorecard = compute_cognitive_scores(
         per_report_scores=per_report_scores,
@@ -129,6 +137,7 @@ def _evaluate_single_model(
         "model_name": model_name,
         "reports_dir": reports_dir,
         "num_reports": len(dataset.test_cases),
+        "avg_response_time_s": avg_response_time,
         "scorecard": scorecard.to_dict(),
         "per_report_scores": per_report_scores,
     }
@@ -236,12 +245,12 @@ def main():
 
         # Print comparison
         if all_results:
-            print("\n" + "=" * 60)
+            print("\n" + "=" * 70)
             print("  MULTI-MODEL COMPARISON")
-            print("=" * 60)
-            header = f"{'Model':<20s} {'SitAware':>8s} {'Reason':>8s} {'Comm':>8s} {'Overall':>8s}"
+            print("=" * 70)
+            header = f"{'Model':<20s} {'SitAware':>8s} {'Reason':>8s} {'Comm':>8s} {'Overall':>8s} {'RespTime':>8s}"
             print(header)
-            print("-" * 60)
+            print("-" * 70)
             for r in all_results:
                 sc = r["scorecard"]["composite"]
                 print(
@@ -249,9 +258,10 @@ def main():
                     f"{sc['situational_awareness']:>7.2%} "
                     f"{sc['reasoning_quality']:>7.2%} "
                     f"{sc['communication_quality']:>7.2%} "
-                    f"{sc['overall_cognitive_score']:>7.2%}"
+                    f"{sc['overall_cognitive_score']:>7.2%} "
+                    f"{r.get('avg_response_time_s', 0.0):>7.2f}s"
                 )
-            print("=" * 60)
+            print("=" * 70)
 
         output = {"comparison": all_results}
     else:

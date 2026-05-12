@@ -42,6 +42,7 @@ def _report_to_test_case(report: dict, source_file: str) -> Optional[LLMTestCase
             "source_file": os.path.basename(source_file),
             "decision_class": report.get("decision_class", "UNKNOWN"),
             "scenario_step": report.get("step"),
+            "response_time_s": report.get("narration_response_time_s", 0.0),
         },
     )
 

@@ -178,6 +178,7 @@ def run_tuning(
     print(f"[Tuner] Best loss    → {best_global_loss:.6f}")
     print(f"{'='*60}")
 
+    results_sorted = sorted(results, key=lambda x: float(x["final_loss"]))
     print(f"\n{'Rank':<5} {'Loss':<12} {'L0':<8} {'Dead%':<8} Config")
     for rank, r in enumerate(results_sorted[:10], 1):
         cfg_str = "  ".join(f"{k}={r[k]}" for k in grid.keys())
