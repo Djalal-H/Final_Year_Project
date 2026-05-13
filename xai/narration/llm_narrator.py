@@ -49,7 +49,8 @@ def narrate(
     if not api_key:
         return (
             f"[LLMNarrator] ERROR: API key not found in env var '{api_key_env}' and doesn't look like a raw key. "
-            f"Set it with: export {api_key_env}=sk-..."
+            f"Set it with: export {api_key_env}=sk-...",
+            0.0
         )
 
     payload = {
