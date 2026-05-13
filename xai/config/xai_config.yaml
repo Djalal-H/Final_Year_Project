@@ -60,6 +60,7 @@ llm:
   model: "llama-3.1-8b-instant"
   max_tokens: 256
   api_key_env: "GROQ_API_KEY"
+  enable_thinking: false
 
 narration_mode: "offline" # "offline" = save reports first, narrate later
 # "online"  = narrate during eval loop

@@ -39,6 +39,7 @@ def narrate(
     model = llm_cfg.get("model", "qwen/qwen3-4b")
     max_tokens = llm_cfg.get("max_tokens", 256)
     api_key_env = llm_cfg.get("api_key_env", "OPENROUTER_API_KEY")
+    enable_thinking = llm_cfg.get("enable_thinking", False)
 
     # Fallback to the literal string if it looks like an API key, so raw keys work directly.
     api_key = os.environ.get(api_key_env, None)
@@ -60,6 +61,9 @@ def narrate(
         ],
     }
 
+    if not enable_thinking:
+        payload["chat_template_kwargs"] = {"enable_thinking": False}
+
     headers = {
         "Content-Type": "application/json",
         "Authorization": f"Bearer {api_key}",
@@ -74,6 +78,8 @@ def narrate(
             timeout=30
         )
         resp.raise_for_status()
+
+        body = resp.json()
 
         # 1. Parse local HTTP time (fallback)
         api_time = resp.elapsed.total_seconds()
