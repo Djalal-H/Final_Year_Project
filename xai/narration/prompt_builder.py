@@ -13,7 +13,7 @@ System prompt constraints (from the specification):
       (3) whether attention confirms the decision
 """
 
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, List, Tuple
 
 from xai.narration.narration_router import BRIEF, DETAILED, DETAILED_CAVEAT
 
@@ -24,14 +24,40 @@ from xai.narration.narration_router import BRIEF, DETAILED, DETAILED_CAVEAT
 
 _SYSTEM_PROMPT = (
     "You are the explanatory module for an Autonomous Driving RL Agent. "
-    "Your role is to narrate the agent's decision using ONLY the structured "
-    "report provided. Rules:\n"
-    "1. Only reference information present in the report — do not speculate.\n"
-    "2. Never claim to know what the model 'might' have been thinking.\n"
-    "3. Keep your response to 3–5 sentences.\n"
-    "4. Always cover: (a) what the vehicle did and why, "
-    "(b) what the most dangerous alternative would have caused, "
-    "(c) whether attention confirms the decision."
+    "You will receive a structured driving report and must produce a "
+    "factual narration of the agent's decision. Follow these rules strictly:\n\n"
+
+    "FACTUAL ACCURACY:\n"
+    "- Cite exact numeric values from the report (agent IDs, velocities, "
+    "TTC values, distances, attention percentages). Do not round, "
+    "paraphrase, or approximate — use the numbers as given.\n"
+    "- Do not invent, infer, or speculate about any agents, road features, "
+    "or events not explicitly listed in the report.\n"
+    "- The necessity score represents the fraction of simulated alternative "
+    "actions that resulted in failure (collision or off-road). It is NOT a "
+    "probability of collision for the chosen action.\n\n"
+
+    "REQUIRED STRUCTURE (3–5 sentences):\n"
+    "Sentence 1 — ACTION & CAUSE: State the ego vehicle's speed, the exact "
+    "chosen action label, and explain why it was necessary by referencing the "
+    "necessity score and the specific threat agents or conditions.\n"
+    "Sentence 2 — COUNTERFACTUAL CONTRAST: Name the single most dangerous "
+    "alternative action by its exact label, state which agent it would have "
+    "collided with (by ID), and cite the exact time-to-collision.\n"
+    "Sentence 3 — ATTENTION CONFIRMATION: State the attention grounding score "
+    "and identify which threat agents the model's attention was focused on "
+    "(by ID and attention mass percentage). Explicitly state whether the "
+    "attention distribution confirms or does not confirm awareness of the "
+    "threat agents identified in the counterfactual analysis.\n"
+    "Sentences 4–5 (optional): Additional context about safe alternatives or "
+    "off-road outcomes, only if present in the report.\n\n"
+
+    "PROHIBITED:\n"
+    "- Do not claim to know what the model 'might', 'could', or 'probably' "
+    "was thinking.\n"
+    "- Do not reference road features, lane markings, traffic signals, or "
+    "weather unless they appear in the report.\n"
+    "- Do not use generic safety language — be specific to this scenario."
 )
 
 
@@ -44,25 +70,66 @@ def _describe_nearby_agents(report: Dict[str, Any]) -> str:
     """Convert the scene_description dictionary into readable sentences for the LLM."""
     desc_list = report.get("scene_description", [])
     if not desc_list:
-        return "No agents nearby."
+        return "  No agents nearby."
 
-    lines = ["Nearby agents:"]
+    lines = []
     for d in desc_list:
         agent_id = d.get("agent_id")
         dist = d.get("distance", "?")
         rels = d.get("relations", [])
         ttc = d.get("ttc")
 
-        # Format relations into a readable list
         rel_str = ", ".join(rels).replace("_", " ") if rels else "no specific relation"
-        
-        sentence = f"- Agent {agent_id} is {dist}m away ({rel_str})"
+
+        sentence = f"  - Agent {agent_id}: {dist}m away ({rel_str})"
         if ttc is not None:
-            sentence += f" with TTC {ttc}s"
-        sentence += "."
+            sentence += f", TTC = {ttc}s"
         lines.append(sentence)
 
-    return " ".join(lines)
+    return "\n".join(lines)
+
+
+def _describe_alternatives(alts: List[Dict[str, Any]]) -> str:
+    """Format ALL alternatives into a clearly labeled list."""
+    if not alts:
+        return "  No alternatives simulated."
+
+    lines = []
+    for a in alts:
+        label = a.get("label", "unknown")
+        outcome = a.get("outcome", "UNKNOWN")
+        entry = f"  - \"{label}\" → {outcome}"
+        if outcome == "COLLISION":
+            tid = a.get("threat_agent_id", "?")
+            ttc = a.get("min_ttc", "?")
+            entry += f" with Agent {tid} in {ttc}s"
+        lines.append(entry)
+
+    return "\n".join(lines)
+
+
+def _describe_attention(report: Dict[str, Any]) -> str:
+    """Format attention grounding data into a clearly labeled block."""
+    grounding = report.get("attention_grounding", {})
+    g_score = grounding.get("grounding_score")
+    if g_score is None:
+        return "  No attention grounding data available."
+
+    breakdown = grounding.get("per_agent_breakdown", [])
+    top_agents = sorted(
+        breakdown, key=lambda x: x.get("attention_mass", 0), reverse=True
+    )[:5]
+
+    lines = [f"  Grounding score: {g_score:.2f}"]
+    lines.append("  Per-agent attention breakdown (ranked):")
+    for a in top_agents:
+        aid = a.get("agent_id", "?")
+        mass = a.get("attention_mass", 0)
+        is_threat = a.get("is_threat", False)
+        threat_tag = " [THREAT]" if is_threat else ""
+        lines.append(f"    - Agent {aid}: {mass:.1%} attention mass{threat_tag}")
+
+    return "\n".join(lines)
 
 
 def _build_detailed(report: Dict[str, Any]) -> str:
@@ -70,46 +137,55 @@ def _build_detailed(report: Dict[str, Any]) -> str:
     ego = report["ego_state"]
     chosen = report["chosen_action"]
     alts = report.get("alternatives", [])
-    grounding = report.get("attention_grounding", {})
     necessity = report.get("necessity_score", 0)
 
     scene_str = _describe_nearby_agents(report)
+    alts_str = _describe_alternatives(alts)
+    attn_str = _describe_attention(report)
 
-    lines = [
-        f"The Ego Vehicle is {ego.get('ego_action', 'moving')} "
-        f"at {ego.get('ego_velocity', '?')} m/s.",
-        scene_str,
-        f"The agent chose: {chosen.get('label', 'unknown action')}.",
-        f"Decision necessity: {necessity:.0%} of alternatives would fail.",
-    ]
-
-    # Most dangerous alternative
+    # Find worst alternative for explicit highlighting
     collisions = [a for a in alts if a.get("outcome") == "COLLISION"]
+    worst_line = ""
     if collisions:
         worst = min(collisions, key=lambda a: a.get("min_ttc") or 999)
-        lines.append(
-            f"Most dangerous alternative: \"{worst.get('label')}\" → "
+        worst_line = (
+            f"  ⚠ MOST DANGEROUS: \"{worst.get('label')}\" → "
             f"COLLISION with Agent {worst.get('threat_agent_id')} "
-            f"in {worst.get('min_ttc', '?')}s."
+            f"in {worst.get('min_ttc', '?')}s"
         )
 
-    # Grounding confirmation
-    g_score = grounding.get("grounding_score")
-    if g_score is not None:
-        breakdown = grounding.get("per_agent_breakdown", [])
-        top_agents = sorted(
-            breakdown, key=lambda x: x.get("attention_mass", 0), reverse=True
-        )[:3]
-        agent_desc = ", ".join(
-            f"Agent {a['agent_id']} ({a['attention_mass']:.1%})"
-            for a in top_agents
-        )
-        lines.append(
-            f"Attention grounding score: {g_score:.2f}. "
-            f"Top attended threat agents: {agent_desc}."
-        )
+    prompt = (
+        f"=== DRIVING REPORT ===\n\n"
 
-    return "\n".join(lines)
+        f"[EGO STATE]\n"
+        f"  Action: {ego.get('ego_action', 'moving')}\n"
+        f"  Velocity: {ego.get('ego_velocity', '?')} m/s\n\n"
+
+        f"[NEARBY AGENTS]\n"
+        f"{scene_str}\n\n"
+
+        f"[CHOSEN ACTION]\n"
+        f"  Label: {chosen.get('label', 'unknown')}\n"
+        f"  Outcome: {chosen.get('outcome', 'SAFE')}\n\n"
+
+        f"[NECESSITY SCORE]\n"
+        f"  {necessity:.0%} of simulated alternative actions resulted in failure.\n\n"
+
+        f"[COUNTERFACTUAL ALTERNATIVES]\n"
+        f"{alts_str}\n"
+    )
+
+    if worst_line:
+        prompt += f"\n{worst_line}\n"
+
+    prompt += (
+        f"\n[ATTENTION GROUNDING]\n"
+        f"{attn_str}\n\n"
+        f"=== END REPORT ===\n\n"
+        f"Using ONLY the data above, narrate the agent's decision."
+    )
+
+    return prompt
 
 
 def _build_detailed_with_caveat(report: Dict[str, Any]) -> str:
@@ -117,11 +193,11 @@ def _build_detailed_with_caveat(report: Dict[str, Any]) -> str:
     base = _build_detailed(report)
 
     caveat = (
-        "\n⚠️ TRANSPARENCY CAVEAT: Although the agent avoided danger, "
-        "its attention distribution does NOT confirm awareness of the "
-        "identified threat agents. This decision is flagged for further "
-        "review — the safe outcome may be coincidental rather than "
-        "intentional."
+        "\n\n⚠️ CRITICAL NOTE: The attention grounding score is LOW — the "
+        "agent's attention was NOT focused on the identified threat agents. "
+        "Your narration MUST explicitly state that the attention distribution "
+        "does not confirm awareness of the threats, and that the safe outcome "
+        "may be coincidental. Do not present the decision as intentionally safe."
     )
     return base + caveat
 
@@ -130,21 +206,42 @@ def _build_brief(report: Dict[str, Any]) -> str:
     """Brief narration for GROUNDED_ROUTINE / ROUTINE."""
     ego = report["ego_state"]
     chosen = report["chosen_action"]
+    alts = report.get("alternatives", [])
     necessity = report.get("necessity_score", 0)
     decision_class = report.get("decision_class", "ROUTINE")
 
     scene_str = _describe_nearby_agents(report)
+    alts_str = _describe_alternatives(alts)
+    attn_str = _describe_attention(report)
 
-    lines = [
-        f"The Ego Vehicle is {ego.get('ego_action', 'moving')} "
-        f"at {ego.get('ego_velocity', '?')} m/s.",
-        scene_str,
-        f"Action: {chosen.get('label', 'unknown')}. "
-        f"Decision class: {decision_class} "
-        f"(necessity {necessity:.0%}).",
-        "No critical threats detected; routine driving conditions.",
-    ]
-    return "\n".join(lines)
+    prompt = (
+        f"=== DRIVING REPORT ===\n\n"
+
+        f"[EGO STATE]\n"
+        f"  Action: {ego.get('ego_action', 'moving')}\n"
+        f"  Velocity: {ego.get('ego_velocity', '?')} m/s\n\n"
+
+        f"[NEARBY AGENTS]\n"
+        f"{scene_str}\n\n"
+
+        f"[CHOSEN ACTION]\n"
+        f"  Label: {chosen.get('label', 'unknown')}\n"
+        f"  Decision class: {decision_class}\n\n"
+
+        f"[NECESSITY SCORE]\n"
+        f"  {necessity:.0%} of simulated alternative actions resulted in failure.\n\n"
+
+        f"[COUNTERFACTUAL ALTERNATIVES]\n"
+        f"{alts_str}\n\n"
+
+        f"[ATTENTION GROUNDING]\n"
+        f"{attn_str}\n\n"
+
+        f"=== END REPORT ===\n\n"
+        f"Using ONLY the data above, narrate the agent's decision."
+    )
+
+    return prompt
 
 
 # =============================================================================
@@ -175,3 +272,4 @@ def build_prompt(
     builder = _TEMPLATE_MAP.get(template_key, _build_brief)
     user_prompt = builder(report)
     return _SYSTEM_PROMPT, user_prompt
+
