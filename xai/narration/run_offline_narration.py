@@ -8,7 +8,7 @@ from xai.narration import narration_router, prompt_builder, llm_narrator
 
 import time
 
-def run_offline_narration(reports_dir: str, config_path: str):
+def run_offline_narration(reports_dir: str, config_path: str, max_reports: int = None):
     """
     Reads all JSON reports in the given directory, generates LLM narrations
     and overwrites the JSON file, saving the response time.
@@ -26,6 +26,9 @@ def run_offline_narration(reports_dir: str, config_path: str):
         return
 
     report_files = sorted(glob.glob(os.path.join(reports_dir, "*.json")))
+    if max_reports is not None and max_reports > 0:
+        report_files = report_files[:max_reports]
+        
     print(f"Found {len(report_files)} reports in {reports_dir}.")
 
     processed = 0
@@ -83,6 +86,12 @@ if __name__ == "__main__":
         default="xai/config/xai_config.yaml", 
         help="Path to xai_config.yaml"
     )
+    parser.add_argument(
+        "--max_reports", 
+        type=int, 
+        default=None, 
+        help="Maximum number of reports to process."
+    )
     args = parser.parse_args()
 
-    run_offline_narration(args.reports_dir, args.config)
+    run_offline_narration(args.reports_dir, args.config, args.max_reports)
