@@ -38,10 +38,10 @@ class SemanticGraphBuilder:
     @staticmethod
     def ego_frame(dx: float, dy: float, ego_yaw: float) -> Tuple[float, float]:
         """Convert world delta (dx,dy) into ego-local coords: x_forward, y_left."""
-        c = math.cos(-ego_yaw)
-        s = math.sin(-ego_yaw)
-        x_local = dx * c - dy * s
-        y_local = dx * s + dy * c
+        c = math.cos(ego_yaw)
+        s = math.sin(ego_yaw)
+        x_local =  c * dx + s * dy
+        y_local = -s * dx + c * dy
         return x_local, y_local
 
     @staticmethod
