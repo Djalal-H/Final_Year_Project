@@ -82,7 +82,7 @@ def narrate(
         resp.raise_for_status()
 
         body = resp.json()
-        print(f"[LLMNarrator DEBUG] Raw API response body:\n{json.dumps(body, indent=2)}")
+        
 
         # 1. Parse local HTTP time (fallback)
         api_time = resp.elapsed.total_seconds()
