@@ -8,6 +8,7 @@ the narration string.  This is the only module that makes a network call.
 
 import json
 import os
+import re
 from typing import Any, Dict, Optional
 
 import requests
@@ -92,7 +93,22 @@ def narrate(
 
         choices = body.get("choices", [])
         if choices:
-            text = choices[0].get("message", {}).get("content", "").strip()
+            msg = choices[0].get("message", {})
+
+            # Some thinking models put content in 'reasoning_content' and
+            # leave 'content' as null when thinking is disabled.
+            text = msg.get("content") or ""
+
+            # Fallback: check for reasoning_content if content is empty
+            if not text.strip():
+                text = msg.get("reasoning_content") or ""
+
+            # Strip <think>...</think> blocks that some models include
+            text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
+
+            if not text:
+                return "[LLMNarrator] WARNING: Model returned empty content after stripping think tags.", round(api_time, 4)
+
             return text, round(api_time, 4)
         return "[LLMNarrator] WARNING: Empty response from API.", round(api_time, 4)
 
