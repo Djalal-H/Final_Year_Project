@@ -107,9 +107,12 @@ def narrate(
             text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
 
             if not text:
+                print(f"[LLMNarrator DEBUG] Raw API response body:\n{json.dumps(body, indent=2)}")
                 return "[LLMNarrator] WARNING: Model returned empty content after stripping think tags.", round(api_time, 4)
 
             return text, round(api_time, 4)
+        
+        print(f"[LLMNarrator DEBUG] Raw API response body (no choices):\n{json.dumps(body, indent=2)}")
         return "[LLMNarrator] WARNING: Empty response from API.", round(api_time, 4)
 
     except requests.exceptions.HTTPError as e:
