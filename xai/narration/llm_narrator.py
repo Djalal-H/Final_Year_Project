@@ -94,7 +94,12 @@ def narrate(
 
         choices = body.get("choices", [])
         if choices:
-            msg = choices[0].get("message", {})
+            choice = choices[0]
+            msg = choice.get("message", {})
+            finish_reason = choice.get("finish_reason")
+
+            if finish_reason == "length":
+                print(f"[LLMNarrator WARNING] Generation cut off by max_tokens limit ({max_tokens}). Model ran out of token budget during thinking!")
 
             # Some thinking models put content in 'reasoning_content' and
             # leave 'content' as null when thinking is disabled.
@@ -108,7 +113,6 @@ def narrate(
             text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
 
             if not text:
-                print(f"[LLMNarrator DEBUG] Raw API response body:\n{json.dumps(body, indent=2)}")
                 return "[LLMNarrator] WARNING: Model returned empty content after stripping think tags.", round(api_time, 4)
 
             return text, round(api_time, 4)
