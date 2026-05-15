@@ -34,7 +34,7 @@ def safety_fidelity_metric(threshold: float = DEFAULT_THRESHOLD, model: str = No
     """Does the narration correctly report collision outcomes and threats?"""
     return GEval(
         name="Safety Fidelity",
-        model=model,
+         
         criteria=(
             "Evaluate whether the narration accurately reflects the safety-critical "
             "information present in the structured driving report. The narration must "
@@ -70,7 +70,7 @@ def perceptual_grounding_metric(threshold: float = DEFAULT_THRESHOLD, model: str
     """Does the narration reference what the attention system actually saw?"""
     return GEval(
         name="Perceptual Grounding",
-        model=model,
+         
         criteria=(
             "Evaluate whether the narration is grounded in the attention data from "
             "the RL agent's perception system. The narration should reference agents "
@@ -106,7 +106,7 @@ def causal_accuracy_metric(threshold: float = DEFAULT_THRESHOLD, model: str = No
     """Is the cause-effect reasoning consistent with the report data?"""
     return GEval(
         name="Causal Accuracy",
-        model=model,
+         
         criteria=(
             "Evaluate whether the narration's causal reasoning (action → outcome → "
             "why) is logically consistent with the structured driving report. The "
@@ -142,7 +142,7 @@ def action_justification_metric(threshold: float = DEFAULT_THRESHOLD, model: str
     """Does the narration justify why the chosen action beats alternatives?"""
     return GEval(
         name="Action Justification",
-        model=model,
+         
         criteria=(
             "Evaluate whether the narration provides a convincing justification for "
             "why the agent chose its action over the available alternatives. The "
@@ -178,7 +178,7 @@ def conciseness_metric(threshold: float = DEFAULT_THRESHOLD, model: str = None) 
     """Does the narration respect the system prompt constraints?"""
     return GEval(
         name="Conciseness and Constraint Compliance",
-        model=model,
+         
         criteria=(
             "Evaluate whether the narration complies with the system prompt "
             "constraints: (a) 3–5 sentences in length, (b) no speculation or "
@@ -221,7 +221,7 @@ def strict_context_grounding_metric(threshold: float = DEFAULT_THRESHOLD, model:
     """
     return GEval(
         name="Strict Context Grounding",
-        model=model,
+         
         criteria=(
             "Evaluate whether EVERY entity (agent, road feature, object, or "
             "numeric value) mentioned in the narration is explicitly present in "
@@ -267,7 +267,7 @@ def progressive_alignment_metric(threshold: float = DEFAULT_THRESHOLD, model: st
     """
     return GEval(
         name="Progressive Alignment",
-        model=model,
+         
         criteria=(
             "Evaluate the narration across three progressive alignment levels. "
             "Each level builds on the previous — getting a higher level right "
@@ -318,7 +318,7 @@ def logical_completeness_metric(threshold: float = DEFAULT_THRESHOLD, model: str
     """
     return GEval(
         name="Logical Completeness",
-        model=model,
+         
         criteria=(
             "Evaluate whether the narration contains all three required "
             "logical chain links from the system prompt, and penalise any "
@@ -366,7 +366,7 @@ def risk_coherence_metric(threshold: float = DEFAULT_THRESHOLD, model: str = Non
     """
     return GEval(
         name="Risk Coherence",
-        model=model,
+         
         criteria=(
             "Evaluate whether the narration's tone and urgency are coherent "
             "with the risk level indicated by the report's necessity_score and "
