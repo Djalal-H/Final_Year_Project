@@ -104,7 +104,7 @@ def _evaluate_single_model(
     eval_results = evaluate(
         test_cases=dataset.test_cases,
         metrics=metrics,
-        ignore_errors=ErrorConfig(
+        error_config=ErrorConfig(
             ignore_errors=config.ignore_errors,
         ),
         async_config=AsyncConfig(
