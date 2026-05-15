@@ -62,6 +62,8 @@ class EvalConfig:
     # Optional: filter reports by decision class(es)
     decision_class_filter: Optional[List[str]] = None
 
+    ignore_errors: bool = False
+
 
 def default_config() -> EvalConfig:
     """Return a fresh default config."""

@@ -88,7 +88,10 @@ def _evaluate_single_model(
         print(f"❌ No valid test cases found in {reports_dir}")
         return {}
 
-    metrics = get_all_metrics(threshold=config.threshold)
+    metrics = get_all_metrics(
+        threshold=config.threshold,
+        model=config.judge_model
+    )
     decision_classes = get_decision_classes(dataset)
 
     # Run batch evaluation — this calls the judge model
@@ -100,6 +103,7 @@ def _evaluate_single_model(
     eval_results = evaluate(
         test_cases=dataset.test_cases,
         metrics=metrics,
+        ignore_errors=config.ignore_errors,
         async_config=AsyncConfig(
             run_async=True,
             max_concurrent=1,
@@ -218,6 +222,12 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Path to save JSON results.",
     )
+    parser.add_argument(
+        "--ignore_errors",
+        "-i",
+        action="store_true",
+        help="Skip failed test cases and continue the run.",
+    )
 
     return parser
 
@@ -230,6 +240,7 @@ def main():
         judge_model=args.judge_model,
         threshold=args.threshold,
         decision_class_filter=args.filter_classes,
+        ignore_errors=args.ignore_errors,
     )
 
     if args.compare:

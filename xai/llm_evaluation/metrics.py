@@ -30,10 +30,11 @@ from xai.llm_evaluation.config import DEFAULT_THRESHOLD
 # 1. Safety Fidelity
 # ═════════════════════════════════════════════════════════════════════════════
 
-def safety_fidelity_metric(threshold: float = DEFAULT_THRESHOLD) -> GEval:
+def safety_fidelity_metric(threshold: float = DEFAULT_THRESHOLD, model: str = None) -> GEval:
     """Does the narration correctly report collision outcomes and threats?"""
     return GEval(
         name="Safety Fidelity",
+        model=model,
         criteria=(
             "Evaluate whether the narration accurately reflects the safety-critical "
             "information present in the structured driving report. The narration must "
@@ -65,10 +66,11 @@ def safety_fidelity_metric(threshold: float = DEFAULT_THRESHOLD) -> GEval:
 # 2. Perceptual Grounding
 # ═════════════════════════════════════════════════════════════════════════════
 
-def perceptual_grounding_metric(threshold: float = DEFAULT_THRESHOLD) -> GEval:
+def perceptual_grounding_metric(threshold: float = DEFAULT_THRESHOLD, model: str = None) -> GEval:
     """Does the narration reference what the attention system actually saw?"""
     return GEval(
         name="Perceptual Grounding",
+        model=model,
         criteria=(
             "Evaluate whether the narration is grounded in the attention data from "
             "the RL agent's perception system. The narration should reference agents "
@@ -100,10 +102,11 @@ def perceptual_grounding_metric(threshold: float = DEFAULT_THRESHOLD) -> GEval:
 # 3. Causal Accuracy
 # ═════════════════════════════════════════════════════════════════════════════
 
-def causal_accuracy_metric(threshold: float = DEFAULT_THRESHOLD) -> GEval:
+def causal_accuracy_metric(threshold: float = DEFAULT_THRESHOLD, model: str = None) -> GEval:
     """Is the cause-effect reasoning consistent with the report data?"""
     return GEval(
         name="Causal Accuracy",
+        model=model,
         criteria=(
             "Evaluate whether the narration's causal reasoning (action → outcome → "
             "why) is logically consistent with the structured driving report. The "
@@ -135,10 +138,11 @@ def causal_accuracy_metric(threshold: float = DEFAULT_THRESHOLD) -> GEval:
 # 4. Action Justification
 # ═════════════════════════════════════════════════════════════════════════════
 
-def action_justification_metric(threshold: float = DEFAULT_THRESHOLD) -> GEval:
+def action_justification_metric(threshold: float = DEFAULT_THRESHOLD, model: str = None) -> GEval:
     """Does the narration justify why the chosen action beats alternatives?"""
     return GEval(
         name="Action Justification",
+        model=model,
         criteria=(
             "Evaluate whether the narration provides a convincing justification for "
             "why the agent chose its action over the available alternatives. The "
@@ -170,10 +174,11 @@ def action_justification_metric(threshold: float = DEFAULT_THRESHOLD) -> GEval:
 # 5. Conciseness & Constraint Compliance
 # ═════════════════════════════════════════════════════════════════════════════
 
-def conciseness_metric(threshold: float = DEFAULT_THRESHOLD) -> GEval:
+def conciseness_metric(threshold: float = DEFAULT_THRESHOLD, model: str = None) -> GEval:
     """Does the narration respect the system prompt constraints?"""
     return GEval(
         name="Conciseness and Constraint Compliance",
+        model=model,
         criteria=(
             "Evaluate whether the narration complies with the system prompt "
             "constraints: (a) 3–5 sentences in length, (b) no speculation or "
@@ -207,7 +212,7 @@ def conciseness_metric(threshold: float = DEFAULT_THRESHOLD) -> GEval:
 # 6. Strict Context Grounding  (inspired by DriveBench)
 # ═════════════════════════════════════════════════════════════════════════════
 
-def strict_context_grounding_metric(threshold: float = DEFAULT_THRESHOLD) -> GEval:
+def strict_context_grounding_metric(threshold: float = DEFAULT_THRESHOLD, model: str = None) -> GEval:
     """Anti-hallucination: every noun/agent/feature must exist in the report.
 
     Inspired by DriveBench's "Context Grounding" methodology which exposes
@@ -216,6 +221,7 @@ def strict_context_grounding_metric(threshold: float = DEFAULT_THRESHOLD) -> GEv
     """
     return GEval(
         name="Strict Context Grounding",
+        model=model,
         criteria=(
             "Evaluate whether EVERY entity (agent, road feature, object, or "
             "numeric value) mentioned in the narration is explicitly present in "
@@ -251,7 +257,7 @@ def strict_context_grounding_metric(threshold: float = DEFAULT_THRESHOLD) -> GEv
 # 7. Progressive Alignment  (inspired by AutoDriDM)
 # ═════════════════════════════════════════════════════════════════════════════
 
-def progressive_alignment_metric(threshold: float = DEFAULT_THRESHOLD) -> GEval:
+def progressive_alignment_metric(threshold: float = DEFAULT_THRESHOLD, model: str = None) -> GEval:
     """Three-level alignment: Object → Scene → Decision.
 
     Inspired by AutoDriDM's progressive evaluation across perception,
@@ -261,6 +267,7 @@ def progressive_alignment_metric(threshold: float = DEFAULT_THRESHOLD) -> GEval:
     """
     return GEval(
         name="Progressive Alignment",
+        model=model,
         criteria=(
             "Evaluate the narration across three progressive alignment levels. "
             "Each level builds on the previous — getting a higher level right "
@@ -303,7 +310,7 @@ def progressive_alignment_metric(threshold: float = DEFAULT_THRESHOLD) -> GEval:
 # 8. Logical Completeness  (inspired by DriveLMM-o1)
 # ═════════════════════════════════════════════════════════════════════════════
 
-def logical_completeness_metric(threshold: float = DEFAULT_THRESHOLD) -> GEval:
+def logical_completeness_metric(threshold: float = DEFAULT_THRESHOLD, model: str = None) -> GEval:
     """Missing-step penalty: all three logical chain links must be present.
 
     Inspired by DriveLMM-o1's evaluation of step-by-step reasoning
@@ -311,6 +318,7 @@ def logical_completeness_metric(threshold: float = DEFAULT_THRESHOLD) -> GEval:
     """
     return GEval(
         name="Logical Completeness",
+        model=model,
         criteria=(
             "Evaluate whether the narration contains all three required "
             "logical chain links from the system prompt, and penalise any "
@@ -350,7 +358,7 @@ def logical_completeness_metric(threshold: float = DEFAULT_THRESHOLD) -> GEval:
 # 9. Risk Coherence  (inspired by DriveLMM-o1)
 # ═════════════════════════════════════════════════════════════════════════════
 
-def risk_coherence_metric(threshold: float = DEFAULT_THRESHOLD) -> GEval:
+def risk_coherence_metric(threshold: float = DEFAULT_THRESHOLD, model: str = None) -> GEval:
     """Tone must match severity: high necessity → urgent language, not 'routine'.
 
     Inspired by DriveLMM-o1's emphasis on accurate severity conveyance
@@ -358,6 +366,7 @@ def risk_coherence_metric(threshold: float = DEFAULT_THRESHOLD) -> GEval:
     """
     return GEval(
         name="Risk Coherence",
+        model=model,
         criteria=(
             "Evaluate whether the narration's tone and urgency are coherent "
             "with the risk level indicated by the report's necessity_score and "
@@ -408,15 +417,15 @@ METRIC_FACTORIES = {
 }
 
 
-def get_all_metrics(threshold: float = DEFAULT_THRESHOLD) -> list:
+def get_all_metrics(threshold: float = DEFAULT_THRESHOLD, model: str = None) -> list:
     """Instantiate and return all 9 XAI evaluation metrics."""
-    return [factory(threshold=threshold) for factory in METRIC_FACTORIES.values()]
+    return [factory(threshold=threshold, model=model) for factory in METRIC_FACTORIES.values()]
 
 
-def get_metric(name: str, threshold: float = DEFAULT_THRESHOLD) -> GEval:
+def get_metric(name: str, threshold: float = DEFAULT_THRESHOLD, model: str = None) -> GEval:
     """Instantiate a single metric by key name."""
     factory = METRIC_FACTORIES.get(name)
     if factory is None:
         valid = ", ".join(METRIC_FACTORIES.keys())
         raise ValueError(f"Unknown metric '{name}'. Valid: {valid}")
-    return factory(threshold=threshold)
+    return factory(threshold=threshold, model=model)
