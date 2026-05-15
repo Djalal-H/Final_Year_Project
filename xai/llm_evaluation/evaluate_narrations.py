@@ -99,11 +99,14 @@ def _evaluate_single_model(
           f"from '{model_name}' with judge='{config.judge_model}'...\n")
 
     from deepeval.evaluate import AsyncConfig
+    from deepeval.evaluate import ErrorConfig
 
     eval_results = evaluate(
         test_cases=dataset.test_cases,
         metrics=metrics,
-        ignore_errors=config.ignore_errors,
+        ignore_errors=ErrorConfig(
+            ignore_errors=config.ignore_errors,
+        ),
         async_config=AsyncConfig(
             run_async=True,
             max_concurrent=1,
